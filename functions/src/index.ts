@@ -177,7 +177,7 @@ app.post('/deploy', requireAuth, async (req, res) => {
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -188,20 +188,13 @@ jobs:
   build_test_deploy:
     runs-on: ubuntu-latest
     env:
-      GCP_PROJECT: \${{ secrets.GCP_PROJECT }}
-      GCP_REGION: \${{ secrets.GCP_REGION }}
-      AR_REPO: \${{ secrets.AR_REPO }}
-      SERVICE_NAME: \${{ secrets.SERVICE_NAME }}
-      IMAGE: \${{ secrets.GCP_REGION }}-docker.pkg.dev/\${{ secrets.GCP_PROJECT }}/\${{ secrets.AR_REPO }}/\${{ github.event.repository.name }}:latest
-      GCP_CREDENTIALS: \${{ secrets.GCP_CREDENTIALS }}
+      GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      AR_REPO: ${{ secrets.AR_REPO }}
+      SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
+      IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ secrets.AR_REPO }}/${{ github.event.repository.name }}:latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: \${{ secrets.GCP_CREDENTIALS }}
 
       - name: Debug - List files
         run: ls -la
@@ -209,10 +202,10 @@ jobs:
       - name: Check package.json
         run: |
           if [ -f package.json ]; then
-            echo "package.json found"
+            echo "✅ package.json found"
             cat package.json
           else
-            echo "package.json not found"
+            echo "❌ package.json not found"
             exit 1
           fi
 
@@ -224,12 +217,8 @@ jobs:
         run: |
           echo "Installing dependencies..."
           if [ -f package-lock.json ]; then
-            echo "Checking package.json and package-lock.json sync..."
-            npm ci --dry-run 2>/dev/null && npm ci || {
-              echo "package-lock.json is out of sync, using npm install instead"
-              rm -f package-lock.json
-              npm install
-            }
+            echo "Using npm ci (package-lock.json found)"
+            npm ci
           else
             echo "Using npm install (no package-lock.json found)"
             npm install
@@ -246,94 +235,36 @@ jobs:
           echo "Building app..."
           npm run build --if-present || echo "No build script found"
 
-      - name: Ensure Dockerfile exists
-        run: |
-          if [ ! -f Dockerfile ]; then
-            echo "Dockerfile not found. Creating a minimal one..."
-            cat > Dockerfile <<EOF
-FROM node:20-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci || npm install
-COPY . .
-EXPOSE 3000
-CMD ["npm","start"]
-EOF
-            echo "Created fallback Dockerfile"
-          else
-            echo "Dockerfile already present"
-          fi
-
       - name: Set up gcloud
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: \${{ secrets.GCP_PROJECT }}
+          project_id: ${{ secrets.GCP_PROJECT }}
+          service_account_key: ${{ secrets.GCLOUD_SERVICE_KEY }}
           export_default_credentials: true
 
       - name: Configure Docker for Artifact Registry
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         run: |
           echo "Configuring Docker for Artifact Registry..."
-          gcloud auth configure-docker "\$GCP_REGION-docker.pkg.dev" --quiet
+          gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
           echo "Docker configured successfully"
 
       - name: Build Docker image
         run: |
-          echo "Building Docker image: \$IMAGE"
-          docker build -t "\$IMAGE" .
+          echo "Building Docker image: $IMAGE"
+          docker build -t "$IMAGE" .
           echo "Docker image built successfully"
 
       - name: Push image to Artifact Registry
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         run: |
           echo "Pushing Docker image to Artifact Registry..."
-          docker push "\$IMAGE"
+          docker push "$IMAGE"
           echo "Docker image pushed successfully"
 
       - name: Deploy to Cloud Run
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         run: |
           echo "Deploying to Cloud Run..."
-          gcloud run deploy "\\$SERVICE_NAME" --image="\\$IMAGE" --region="\\$GCP_REGION" --platform=managed --allow-unauthenticated
-          echo "Deployed to Cloud Run successfully"
-
-      - name: Capture Cloud Run URL
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        run: |
-          URL=$(gcloud run services describe "\\$SERVICE_NAME" --region="\\$GCP_REGION" --format='value(status.url)')
-          echo "CLOUD_RUN_URL=$URL" >> $GITHUB_ENV
-          echo "$URL" > cloud-run-url.txt
-          echo "Cloud Run URL: $URL"
-
-      - name: Upload Cloud Run URL artifact
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: cloud-run-url
-          path: cloud-run-url.txt
-
-      - name: Notify backend with deployment URL
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        env:
-          WEBHOOK_URL: https://api-mcwd6yzjia-uc.a.run.app/deploy/webhook
-          WEBHOOK_KEY: \${{ secrets.DEPLOY_WEBHOOK_KEY }}
-        run: |
-          if [ -f cloud-run-url.txt ]; then
-            URL=$(cat cloud-run-url.txt)
-            REPO=\${{ github.repository }}
-            curl -sS -X POST "$WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -H "X-Webhook-Key: $WEBHOOK_KEY" \
-              -d "{\"repoFullName\":\"$REPO\",\"url\":\"$URL\"}"
-          else
-            echo "No URL file to send"
-          fi
-
-      - name: Skip deploy (no credentials or PR from fork)
-        if: \${{ !(env.GCP_CREDENTIALS != '') || github.event_name == 'pull_request' }}
-        run: |
-          echo "Skipping GCP auth/deploy because GCP_CREDENTIALS is not available or this is a pull_request from a fork."`;
+          gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$GCP_REGION" --platform=managed --allow-unauthenticated
+          echo "Deployed to Cloud Run successfully"`;
   const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
 
   // Force update the workflow file to ensure latest version
