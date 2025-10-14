@@ -4,6 +4,7 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { initializeApp, getApps } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
+import { defineSecret } from 'firebase-functions/params';
 import cors from 'cors';
 import sodium from 'libsodium-wrappers';
 import * as fs from 'fs';
@@ -14,6 +15,10 @@ if (getApps().length === 0) {
 }
 const db = getFirestore();
 const WEBHOOK_KEY = process.env.DEPLOY_WEBHOOK_KEY || process.env.WEBHOOK_KEY || '';
+
+// Define secrets for API keys
+const genaiApiKey = defineSecret('GENAI_API_KEY');
+const julesApiKey = defineSecret('JULES_API_KEY');
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -548,7 +553,128 @@ EOF
     console.error('Failed to disable old workflows', e);
   }
 
-  res.json({ ok: true });
+  // 6) Start Jules session for analysis/fix/logs
+  let julesSessionId: string | null = null;
+  try {
+    const [owner, repo] = repoFullName.split('/');
+    const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+    if (julesApiKeyValue) {
+      const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
+      const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
+        body: JSON.stringify({
+          prompt,
+          sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: defaultBranch } },
+          title: `Devyntra deploy: ${repoFullName}`
+        })
+      });
+      if (julesResp.ok) {
+        const julesData = await julesResp.json() as any;
+        julesSessionId = (julesData.name || julesData.id || '').toString();
+        console.log('✅ Jules session created:', julesSessionId);
+      } else {
+        console.error('❌ Failed to create Jules session:', await julesResp.text());
+      }
+    } else {
+      console.log('⚠️ Jules API key not configured');
+    }
+  } catch (e) {
+    console.error('Jules session error', e);
+  }
+
+  // 7) Simulate GCP deploy step (as requested, keep production deploy simulated; other steps real)
+  const deploymentUrl = `https://cloud-run-simulated.devyntra.app/${encodeURIComponent(repoFullName)}`;
+
+  res.json({
+    detectedStack: isNode ? 'node' : 'unknown',
+    detectedFramework,
+    workflowEnsured: true,
+    dockerfileEnsured: isNode,
+    dockerHubSecretsSet: true,
+    julesSessionId,
+    deploymentUrl
+  });
 });
 
-export const api = onRequest({ region: 'us-central1' }, app);
+// Latest workflow run status
+app.get('/deploy/status', requireAuth, async (req, res) => {
+  const repoFullName = req.query.repo as string | undefined;
+  if (!repoFullName) return res.status(400).json({ error: 'repo query required' });
+  const uid = (req as any).uid as string;
+  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+  const ghToken = (tokenDoc.data() as any).accessToken as string;
+  const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs?per_page=1`, {
+    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+  });
+  const data = await resp.json() as any;
+  if (!resp.ok) return res.status(resp.status).json(data);
+  const run = (data.workflow_runs && data.workflow_runs[0]) || null;
+  res.json({ status: run?.status || 'unknown', conclusion: run?.conclusion || null, html_url: run?.html_url || null });
+});
+
+// Jules session status and activities
+app.get('/jules/status', requireAuth, async (req, res) => {
+  const sessionId = req.query.session as string | undefined;
+  if (!sessionId) return res.status(400).json({ error: 'session query required' });
+  const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+  if (!julesApiKeyValue) return res.status(400).json({ error: 'Jules not configured' });
+  const [sessionResp, activitiesResp] = await Promise.all([
+    fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } }),
+    fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}/activities?pageSize=30`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } })
+  ]);
+  const session = await sessionResp.json();
+  const activities = await activitiesResp.json();
+  res.json({ session, activities });
+});
+
+// DevAI proxy to Google Generative Language API (server-side to keep API key secret)
+app.post('/devai', requireAuth, async (req, res) => {
+  try {
+    const { prompt } = req.body as { prompt?: string };
+    if (!prompt || !prompt.trim()) return res.status(400).json({ error: 'prompt required' });
+    const apiKey = genaiApiKey.value() || process.env.GENAI_API_KEY || process.env.GOOGLE_GENAI_API_KEY || process.env.GEMINI_API_KEY || '';
+    if (!apiKey) return res.status(500).json({ error: 'DevAI not configured' });
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=' + encodeURIComponent(apiKey);
+    const body = {
+      contents: [
+        { role: 'user', parts: [{ text: prompt }] }
+      ]
+    };
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await resp.json() as any;
+    if (!resp.ok) return res.status(resp.status).json(data);
+    const text = (data.candidates?.[0]?.content?.parts?.[0]?.text) || '';
+    res.json({ text });
+  } catch (e) {
+    console.error('DevAI error', e);
+    res.status(500).json({ error: 'DevAI request failed' });
+  }
+});
+
+// Send a follow-up message to Jules session
+app.post('/jules/send', requireAuth, async (req, res) => {
+  try {
+    const { sessionId, prompt } = req.body as { sessionId?: string; prompt?: string };
+    if (!sessionId || !prompt) return res.status(400).json({ error: 'sessionId and prompt required' });
+    const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+    if (!julesApiKeyValue) return res.status(500).json({ error: 'Jules not configured' });
+    const url = `https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}:sendMessage`;
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue }, body: JSON.stringify({ prompt }) });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error('Jules send error', e);
+    res.status(500).json({ error: 'Failed to send message to Jules' });
+  }
+});
+
+export const api = onRequest({ 
+  region: 'us-central1',
+  secrets: [genaiApiKey, julesApiKey]
+}, app);
+
+
+
