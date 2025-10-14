@@ -12,9 +12,9 @@ yarn-error.log*
 .env.production.local
 
 # Service account keys and secrets
-*.json
 devyntra-deploy-key.json
 service-account-key.json
+*-key.json
 
 # Build outputs
 dist/
