@@ -7,8 +7,6 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { defineSecret } from 'firebase-functions/params';
 import cors from 'cors';
 import sodium from 'libsodium-wrappers';
-import * as fs from 'fs';
-import * as path from 'path';
 if (getApps().length === 0) {
     initializeApp();
 }
@@ -399,38 +397,8 @@ jobs:
                 });
                 console.log(`✅ Set secret: ${name}`);
             }
-            // Set GCP service account key secrets automatically from file
-            try {
-                const keyPath = path.join(__dirname, '..', 'devyntra-deploy-key.json');
-                let serviceAccountKey;
-                if (fs.existsSync(keyPath)) {
-                    serviceAccountKey = fs.readFileSync(keyPath, 'utf8');
-                    console.log('✅ Reading service account key from file:', keyPath);
-                }
-                else {
-                    console.error('❌ Service account key file not found at:', keyPath);
-                    throw new Error('Service account key file not found');
-                }
-                const encrypted_key = encrypt(serviceAccountKey);
-                const secretNames = ['GCLOUD_SERVICE_KEY', 'GCP_CREDENTIALS', 'GCP_SERVICE_ACCOUNT_KEY'];
-                for (const secretName of secretNames) {
-                    const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${secretName}`, {
-                        method: 'PUT',
-                        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
-                    });
-                    if (resp.ok) {
-                        console.log(`✅ Set ${secretName} secret`);
-                    }
-                    else {
-                        const errorText = await resp.text();
-                        console.error(`❌ Failed setting ${secretName}:`, resp.status, errorText);
-                    }
-                }
-            }
-            catch (e) {
-                console.error('❌ Failed to set GCLOUD_SERVICE_KEY:', e);
-            }
+            // Skip GCLOUD_SERVICE_KEY setup for now - not essential for basic deployment
+            console.log('⚠️ Skipping GCLOUD_SERVICE_KEY setup (not essential for basic deployment)');
         }
     }
     catch (e) {
@@ -478,7 +446,7 @@ jobs:
     let julesSessionId = null;
     try {
         const [owner, repo] = repoFullName.split('/');
-        const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '').trim();
         if (julesApiKeyValue) {
             const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
             const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
@@ -542,7 +510,7 @@ app.get('/jules/status', requireAuth, async (req, res) => {
     const sessionId = req.query.session;
     if (!sessionId)
         return res.status(400).json({ error: 'session query required' });
-    const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+    const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '').trim();
     if (!julesApiKeyValue)
         return res.status(400).json({ error: 'Jules not configured' });
     const [sessionResp, activitiesResp] = await Promise.all([
@@ -586,7 +554,7 @@ app.post('/jules/send', requireAuth, async (req, res) => {
         const { sessionId, prompt } = req.body;
         if (!sessionId || !prompt)
             return res.status(400).json({ error: 'sessionId and prompt required' });
-        const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '').trim();
         if (!julesApiKeyValue)
             return res.status(500).json({ error: 'Jules not configured' });
         const url = `https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}:sendMessage`;
