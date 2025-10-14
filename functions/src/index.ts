@@ -188,11 +188,11 @@ jobs:
   build_test_deploy:
     runs-on: ubuntu-latest
     env:
-      GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-      GCP_REGION: ${{ secrets.GCP_REGION }}
-      AR_REPO: ${{ secrets.AR_REPO }}
-      SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
-      IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ secrets.AR_REPO }}/${{ github.event.repository.name }}:latest
+      GCP_PROJECT: \${{ secrets.GCP_PROJECT }}
+      GCP_REGION: \${{ secrets.GCP_REGION }}
+      AR_REPO: \${{ secrets.AR_REPO }}
+      SERVICE_NAME: \${{ secrets.SERVICE_NAME }}
+      IMAGE: \${{ secrets.GCP_REGION }}-docker.pkg.dev/\${{ secrets.GCP_PROJECT }}/\${{ secrets.AR_REPO }}/\${{ github.event.repository.name }}:latest
     steps:
       - uses: actions/checkout@v4
 
@@ -238,32 +238,32 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT }}
-          service_account_key: ${{ secrets.GCLOUD_SERVICE_KEY }}
+          project_id: \${{ secrets.GCP_PROJECT }}
+          service_account_key: \${{ secrets.GCLOUD_SERVICE_KEY }}
           export_default_credentials: true
 
       - name: Configure Docker for Artifact Registry
         run: |
           echo "Configuring Docker for Artifact Registry..."
-          gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+          gcloud auth configure-docker "\$GCP_REGION-docker.pkg.dev" --quiet
           echo "Docker configured successfully"
 
       - name: Build Docker image
         run: |
-          echo "Building Docker image: $IMAGE"
-          docker build -t "$IMAGE" .
+          echo "Building Docker image: \$IMAGE"
+          docker build -t "\$IMAGE" .
           echo "Docker image built successfully"
 
       - name: Push image to Artifact Registry
         run: |
           echo "Pushing Docker image to Artifact Registry..."
-          docker push "$IMAGE"
+          docker push "\$IMAGE"
           echo "Docker image pushed successfully"
 
       - name: Deploy to Cloud Run
         run: |
           echo "Deploying to Cloud Run..."
-          gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$GCP_REGION" --platform=managed --allow-unauthenticated
+          gcloud run deploy "\$SERVICE_NAME" --image="\$IMAGE" --region="\$GCP_REGION" --platform=managed --allow-unauthenticated
           echo "Deployed to Cloud Run successfully"`;
   const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
 

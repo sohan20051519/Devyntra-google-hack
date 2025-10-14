@@ -4,6 +4,7 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { initializeApp, getApps } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
+import { defineSecret } from 'firebase-functions/params';
 import cors from 'cors';
 import sodium from 'libsodium-wrappers';
 import * as fs from 'fs';
@@ -13,6 +14,9 @@ if (getApps().length === 0) {
 }
 const db = getFirestore();
 const WEBHOOK_KEY = process.env.DEPLOY_WEBHOOK_KEY || process.env.WEBHOOK_KEY || '';
+// Define secrets for API keys
+const genaiApiKey = defineSecret('GENAI_API_KEY');
+const julesApiKey = defineSecret('JULES_API_KEY');
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
@@ -174,7 +178,7 @@ app.post('/deploy', requireAuth, async (req, res) => {
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -190,15 +194,8 @@ jobs:
       AR_REPO: \${{ secrets.AR_REPO }}
       SERVICE_NAME: \${{ secrets.SERVICE_NAME }}
       IMAGE: \${{ secrets.GCP_REGION }}-docker.pkg.dev/\${{ secrets.GCP_PROJECT }}/\${{ secrets.AR_REPO }}/\${{ github.event.repository.name }}:latest
-      GCP_CREDENTIALS: \${{ secrets.GCP_CREDENTIALS }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: \${{ secrets.GCP_CREDENTIALS }}
 
       - name: Debug - List files
         run: ls -la
@@ -206,10 +203,10 @@ jobs:
       - name: Check package.json
         run: |
           if [ -f package.json ]; then
-            echo "package.json found"
+            echo "✅ package.json found"
             cat package.json
           else
-            echo "package.json not found"
+            echo "❌ package.json not found"
             exit 1
           fi
 
@@ -221,12 +218,8 @@ jobs:
         run: |
           echo "Installing dependencies..."
           if [ -f package-lock.json ]; then
-            echo "Checking package.json and package-lock.json sync..."
-            npm ci --dry-run 2>/dev/null && npm ci || {
-              echo "package-lock.json is out of sync, using npm install instead"
-              rm -f package-lock.json
-              npm install
-            }
+            echo "Using npm ci (package-lock.json found)"
+            npm ci
           else
             echo "Using npm install (no package-lock.json found)"
             npm install
@@ -243,33 +236,14 @@ jobs:
           echo "Building app..."
           npm run build --if-present || echo "No build script found"
 
-      - name: Ensure Dockerfile exists
-        run: |
-          if [ ! -f Dockerfile ]; then
-            echo "Dockerfile not found. Creating a minimal one..."
-            cat > Dockerfile <<EOF
-FROM node:20-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci || npm install
-COPY . .
-EXPOSE 3000
-CMD ["npm","start"]
-EOF
-            echo "Created fallback Dockerfile"
-          else
-            echo "Dockerfile already present"
-          fi
-
       - name: Set up gcloud
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: \${{ secrets.GCP_PROJECT }}
+          service_account_key: \${{ secrets.GCLOUD_SERVICE_KEY }}
           export_default_credentials: true
 
       - name: Configure Docker for Artifact Registry
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         run: |
           echo "Configuring Docker for Artifact Registry..."
           gcloud auth configure-docker "\$GCP_REGION-docker.pkg.dev" --quiet
@@ -282,55 +256,16 @@ EOF
           echo "Docker image built successfully"
 
       - name: Push image to Artifact Registry
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         run: |
           echo "Pushing Docker image to Artifact Registry..."
           docker push "\$IMAGE"
           echo "Docker image pushed successfully"
 
       - name: Deploy to Cloud Run
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
         run: |
           echo "Deploying to Cloud Run..."
-          gcloud run deploy "\\$SERVICE_NAME" --image="\\$IMAGE" --region="\\$GCP_REGION" --platform=managed --allow-unauthenticated
-          echo "Deployed to Cloud Run successfully"
-
-      - name: Capture Cloud Run URL
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        run: |
-          URL=$(gcloud run services describe "\\$SERVICE_NAME" --region="\\$GCP_REGION" --format='value(status.url)')
-          echo "CLOUD_RUN_URL=$URL" >> $GITHUB_ENV
-          echo "$URL" > cloud-run-url.txt
-          echo "Cloud Run URL: $URL"
-
-      - name: Upload Cloud Run URL artifact
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: cloud-run-url
-          path: cloud-run-url.txt
-
-      - name: Notify backend with deployment URL
-        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
-        env:
-          WEBHOOK_URL: https://api-mcwd6yzjia-uc.a.run.app/deploy/webhook
-          WEBHOOK_KEY: \${{ secrets.DEPLOY_WEBHOOK_KEY }}
-        run: |
-          if [ -f cloud-run-url.txt ]; then
-            URL=$(cat cloud-run-url.txt)
-            REPO=\${{ github.repository }}
-            curl -sS -X POST "$WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -H "X-Webhook-Key: $WEBHOOK_KEY" \
-              -d "{\"repoFullName\":\"$REPO\",\"url\":\"$URL\"}"
-          else
-            echo "No URL file to send"
-          fi
-
-      - name: Skip deploy (no credentials or PR from fork)
-        if: \${{ !(env.GCP_CREDENTIALS != '') || github.event_name == 'pull_request' }}
-        run: |
-          echo "Skipping GCP auth/deploy because GCP_CREDENTIALS is not available or this is a pull_request from a fork."`;
+          gcloud run deploy "\$SERVICE_NAME" --image="\$IMAGE" --region="\$GCP_REGION" --platform=managed --allow-unauthenticated
+          echo "Deployed to Cloud Run successfully"`;
     const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
     // Force update the workflow file to ensure latest version
     console.log(`🔍 Checking workflow file at: ${workflowPath}`);
@@ -539,6 +474,134 @@ EOF
     catch (e) {
         console.error('Failed to disable old workflows', e);
     }
-    res.json({ ok: true });
+    // 6) Start Jules session for analysis/fix/logs
+    let julesSessionId = null;
+    try {
+        const [owner, repo] = repoFullName.split('/');
+        const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+        if (julesApiKeyValue) {
+            const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
+            const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
+                body: JSON.stringify({
+                    prompt,
+                    sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: defaultBranch } },
+                    title: `Devyntra deploy: ${repoFullName}`
+                })
+            });
+            if (julesResp.ok) {
+                const julesData = await julesResp.json();
+                julesSessionId = (julesData.name || julesData.id || '').toString();
+                console.log('✅ Jules session created:', julesSessionId);
+            }
+            else {
+                console.error('❌ Failed to create Jules session:', await julesResp.text());
+            }
+        }
+        else {
+            console.log('⚠️ Jules API key not configured');
+        }
+    }
+    catch (e) {
+        console.error('Jules session error', e);
+    }
+    // 7) Simulate GCP deploy step (as requested, keep production deploy simulated; other steps real)
+    const deploymentUrl = `https://cloud-run-simulated.devyntra.app/${encodeURIComponent(repoFullName)}`;
+    res.json({
+        detectedStack: isNode ? 'node' : 'unknown',
+        detectedFramework,
+        workflowEnsured: true,
+        dockerfileEnsured: isNode,
+        dockerHubSecretsSet: true,
+        julesSessionId,
+        deploymentUrl
+    });
 });
-export const api = onRequest({ region: 'us-central1' }, app);
+// Latest workflow run status
+app.get('/deploy/status', requireAuth, async (req, res) => {
+    const repoFullName = req.query.repo;
+    if (!repoFullName)
+        return res.status(400).json({ error: 'repo query required' });
+    const uid = req.uid;
+    const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+    if (!tokenDoc.exists)
+        return res.status(400).json({ error: 'GitHub not linked' });
+    const ghToken = tokenDoc.data().accessToken;
+    const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs?per_page=1`, {
+        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    const data = await resp.json();
+    if (!resp.ok)
+        return res.status(resp.status).json(data);
+    const run = (data.workflow_runs && data.workflow_runs[0]) || null;
+    res.json({ status: run?.status || 'unknown', conclusion: run?.conclusion || null, html_url: run?.html_url || null });
+});
+// Jules session status and activities
+app.get('/jules/status', requireAuth, async (req, res) => {
+    const sessionId = req.query.session;
+    if (!sessionId)
+        return res.status(400).json({ error: 'session query required' });
+    const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+    if (!julesApiKeyValue)
+        return res.status(400).json({ error: 'Jules not configured' });
+    const [sessionResp, activitiesResp] = await Promise.all([
+        fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } }),
+        fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}/activities?pageSize=30`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } })
+    ]);
+    const session = await sessionResp.json();
+    const activities = await activitiesResp.json();
+    res.json({ session, activities });
+});
+// DevAI proxy to Google Generative Language API (server-side to keep API key secret)
+app.post('/devai', requireAuth, async (req, res) => {
+    try {
+        const { prompt } = req.body;
+        if (!prompt || !prompt.trim())
+            return res.status(400).json({ error: 'prompt required' });
+        const apiKey = genaiApiKey.value() || process.env.GENAI_API_KEY || process.env.GOOGLE_GENAI_API_KEY || process.env.GEMINI_API_KEY || '';
+        if (!apiKey)
+            return res.status(500).json({ error: 'DevAI not configured' });
+        const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=' + encodeURIComponent(apiKey);
+        const body = {
+            contents: [
+                { role: 'user', parts: [{ text: prompt }] }
+            ]
+        };
+        const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const data = await resp.json();
+        if (!resp.ok)
+            return res.status(resp.status).json(data);
+        const text = (data.candidates?.[0]?.content?.parts?.[0]?.text) || '';
+        res.json({ text });
+    }
+    catch (e) {
+        console.error('DevAI error', e);
+        res.status(500).json({ error: 'DevAI request failed' });
+    }
+});
+// Send a follow-up message to Jules session
+app.post('/jules/send', requireAuth, async (req, res) => {
+    try {
+        const { sessionId, prompt } = req.body;
+        if (!sessionId || !prompt)
+            return res.status(400).json({ error: 'sessionId and prompt required' });
+        const julesApiKeyValue = julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '';
+        if (!julesApiKeyValue)
+            return res.status(500).json({ error: 'Jules not configured' });
+        const url = `https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(sessionId)}:sendMessage`;
+        const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue }, body: JSON.stringify({ prompt }) });
+        const data = await resp.json();
+        if (!resp.ok)
+            return res.status(resp.status).json(data);
+        res.json({ ok: true, data });
+    }
+    catch (e) {
+        console.error('Jules send error', e);
+        res.status(500).json({ error: 'Failed to send message to Jules' });
+    }
+});
+export const api = onRequest({
+    region: 'us-central1',
+    secrets: [genaiApiKey, julesApiKey]
+}, app);
