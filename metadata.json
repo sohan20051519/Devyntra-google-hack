@@ -1,0 +1,5 @@
+{
+  "name": "Devyntra - AI DevOps Automation",
+  "description": "An AI-powered DevOps automation platform to streamline your deployment workflow, from code analysis and auto-fixing to CI/CD pipeline creation and production deployment on GCP. This is a simulated application showcasing the potential of AI in DevOps.",
+  "requestFramePermissions": []
+}
