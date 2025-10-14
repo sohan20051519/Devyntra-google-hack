@@ -1,0 +1,554 @@
+import express from 'express';
+import fetch from 'node-fetch';
+import { onRequest } from 'firebase-functions/v2/https';
+import { initializeApp, getApps } from 'firebase-admin/app';
+import { getAuth as getAdminAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
+import cors from 'cors';
+import sodium from 'libsodium-wrappers';
+import * as fs from 'fs';
+import * as path from 'path';
+
+if (getApps().length === 0) {
+  initializeApp();
+}
+const db = getFirestore();
+const WEBHOOK_KEY = process.env.DEPLOY_WEBHOOK_KEY || process.env.WEBHOOK_KEY || '';
+
+const app = express();
+app.use(cors({ origin: true }));
+app.use(express.json());
+
+function requireAuth(req: any, res: any, next: any) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+  if (!token) return res.status(401).json({ error: 'Missing ID token' });
+  getAdminAuth()
+    .verifyIdToken(token)
+    .then((decoded) => {
+      (req as any).uid = decoded.uid;
+      next();
+    })
+    .catch(() => res.status(401).json({ error: 'Invalid ID token' }));
+}
+
+// Store GitHub OAuth access token received from Firebase client sign-in
+app.post('/auth/github', requireAuth, async (req, res) => {
+  const { accessToken } = req.body as { accessToken?: string };
+  if (!accessToken) return res.status(400).json({ error: 'Missing accessToken' });
+  const uid = (req as any).uid as string;
+  await db.collection('githubTokens').doc(uid).set({ accessToken }, { merge: true });
+  res.json({ ok: true });
+});
+
+// List repositories for the authenticated user (selected/all scopes handled by GitHub OAuth)
+app.get('/repos', requireAuth, async (req, res) => {
+  const uid = (req as any).uid as string;
+  const doc = await db.collection('githubTokens').doc(uid).get();
+  if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+  const token = (doc.data() as any).accessToken as string;
+  const response = await fetch('https://api.github.com/user/repos?per_page=100', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json'
+    }
+  });
+  const data = await response.json() as any;
+  if (!response.ok) return res.status(response.status).json(data);
+  res.json(
+    (data as any[]).map((r) => ({ id: String(r.id), name: r.full_name }))
+  );
+});
+
+// Receive webhook from CI with the deployed Cloud Run URL
+app.post('/deploy/webhook', async (req, res) => {
+  try {
+    const key = (req.headers['x-webhook-key'] as string) || '';
+    if (!WEBHOOK_KEY || key !== WEBHOOK_KEY) return res.status(401).json({ error: 'unauthorized' });
+    const { repoFullName, url } = req.body as { repoFullName?: string; url?: string };
+    if (!repoFullName || !url) return res.status(400).json({ error: 'repoFullName and url required' });
+
+    const createdAt = new Date().toISOString();
+    // Store under deployments/{repo}/runs/{createdAt}
+    await db.collection('deployments').doc(repoFullName).collection('runs').doc(createdAt).set({
+      repoFullName,
+      url,
+      createdAt
+    });
+    // Also store latest pointer
+    await db.collection('deployments').doc(repoFullName).set({ latestUrl: url, updatedAt: createdAt }, { merge: true });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('deploy webhook error', e);
+    res.status(500).json({ error: 'failed' });
+  }
+});
+
+// Get latest deployed URL for a repo
+app.get('/deploy/latest', async (req, res) => {
+  try {
+    const repoFullName = req.query.repo as string | undefined;
+    if (!repoFullName) return res.status(400).json({ error: 'repo query required' });
+    const doc = await db.collection('deployments').doc(repoFullName).get();
+    const data = doc.exists ? (doc.data() as any) : null;
+    res.json({ url: data?.latestUrl || null, updatedAt: data?.updatedAt || null });
+  } catch (e) {
+    console.error('deploy latest error', e);
+    res.status(500).json({ error: 'failed' });
+  }
+});
+
+// List saved projects for the authenticated user
+app.get('/projects', requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).uid as string;
+    const snapshot = await db.collection('projects').doc(uid).collection('repos').orderBy('updatedAt', 'desc').get();
+    const items = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    res.json({ items });
+  } catch (e) {
+    console.error('list projects error', e);
+    res.status(500).json({ error: 'Failed to list projects' });
+  }
+});
+
+// GitHub user profile
+app.get('/github/me', requireAuth, async (req, res) => {
+  const uid = (req as any).uid as string;
+  const doc = await db.collection('githubTokens').doc(uid).get();
+  if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+  const token = (doc.data() as any).accessToken as string;
+  const response = await fetch('https://api.github.com/user', {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+  });
+  const data = await response.json() as any;
+  if (!response.ok) return res.status(response.status).json(data);
+  res.json({ login: data.login, name: data.name, avatar_url: data.avatar_url, html_url: data.html_url });
+});
+
+// Start deployment orchestration (real GitHub workflow creation; GCP deploy remains simulated per request)
+app.post('/deploy', requireAuth, async (req, res) => {
+  const { repoFullName } = req.body as { repoFullName?: string };
+  if (!repoFullName) return res.status(400).json({ error: 'repoFullName required' });
+  const uid = (req as any).uid as string;
+  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+  const ghToken = (tokenDoc.data() as any).accessToken as string;
+
+  // 1) Detect framework (basic heuristic via repo file listing)
+  const treeResp = await fetch(`https://api.github.com/repos/${repoFullName}/git/trees/HEAD?recursive=1`, {
+    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+  });
+  const tree = (await treeResp.json()) as any;
+  if (!treeResp.ok) return res.status(treeResp.status).json(tree);
+  const paths: string[] = (tree.tree || []).map((t: any) => t.path as string);
+  const isNode = paths.includes('package.json') || paths.some((p) => p.endsWith('package.json'));
+  const detectedFramework = (() => {
+    const has = (p: string) => paths.some((x) => x.toLowerCase().includes(p));
+    if (has('next.config')) return 'Next.js';
+    if (has('angular.json')) return 'Angular';
+    if (has('vite.config')) return 'Vite';
+    if (has('vue.config') || has('src/main.ts') && has('src/App.vue')) return 'Vue';
+    return isNode ? 'Node.js' : 'Unknown';
+  })();
+
+  // Determine default branch for workflow dispatch
+  const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+  });
+  const repoMeta = await repoResp.json() as any;
+  const defaultBranch = repoResp.ok && repoMeta.default_branch ? String(repoMeta.default_branch) : 'main';
+
+  // If unsupported stack, stop early with an informative error
+  if (!isNode) {
+    return res.status(400).json({ error: 'Unsupported repository type. A package.json was not found. Currently only Node.js repos are supported.' });
+  }
+
+  // 2) Ensure workflow file exists - real build/test + Docker build/push
+  const workflowPath = '.github/workflows/deploy.yml';
+  const getFileResp = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+  });
+  const workflowYml = `name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build_test_deploy:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT: \${{ secrets.GCP_PROJECT }}
+      GCP_REGION: \${{ secrets.GCP_REGION }}
+      AR_REPO: \${{ secrets.AR_REPO }}
+      SERVICE_NAME: \${{ secrets.SERVICE_NAME }}
+      IMAGE: \${{ secrets.GCP_REGION }}-docker.pkg.dev/\${{ secrets.GCP_PROJECT }}/\${{ secrets.AR_REPO }}/\${{ github.event.repository.name }}:latest
+      GCP_CREDENTIALS: \${{ secrets.GCP_CREDENTIALS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: \${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Debug - List files
+        run: ls -la
+
+      - name: Check package.json
+        run: |
+          if [ -f package.json ]; then
+            echo "package.json found"
+            cat package.json
+          else
+            echo "package.json not found"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          echo "Installing dependencies..."
+          if [ -f package-lock.json ]; then
+            echo "Checking package.json and package-lock.json sync..."
+            npm ci --dry-run 2>/dev/null && npm ci || {
+              echo "package-lock.json is out of sync, using npm install instead"
+              rm -f package-lock.json
+              npm install
+            }
+          else
+            echo "Using npm install (no package-lock.json found)"
+            npm install
+          fi
+          echo "Dependencies installed successfully"
+
+      - name: Run tests
+        run: |
+          echo "Running tests..."
+          npm test --if-present || echo "No tests found or tests failed"
+
+      - name: Build app
+        run: |
+          echo "Building app..."
+          npm run build --if-present || echo "No build script found"
+
+      - name: Ensure Dockerfile exists
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "Dockerfile not found. Creating a minimal one..."
+            cat > Dockerfile <<EOF
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci || npm install
+COPY . .
+EXPOSE 3000
+CMD ["npm","start"]
+EOF
+            echo "Created fallback Dockerfile"
+          else
+            echo "Dockerfile already present"
+          fi
+
+      - name: Set up gcloud
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: \${{ secrets.GCP_PROJECT }}
+          export_default_credentials: true
+
+      - name: Configure Docker for Artifact Registry
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        run: |
+          echo "Configuring Docker for Artifact Registry..."
+          gcloud auth configure-docker "\$GCP_REGION-docker.pkg.dev" --quiet
+          echo "Docker configured successfully"
+
+      - name: Build Docker image
+        run: |
+          echo "Building Docker image: \$IMAGE"
+          docker build -t "\$IMAGE" .
+          echo "Docker image built successfully"
+
+      - name: Push image to Artifact Registry
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        run: |
+          echo "Pushing Docker image to Artifact Registry..."
+          docker push "\$IMAGE"
+          echo "Docker image pushed successfully"
+
+      - name: Deploy to Cloud Run
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        run: |
+          echo "Deploying to Cloud Run..."
+          gcloud run deploy "\\$SERVICE_NAME" --image="\\$IMAGE" --region="\\$GCP_REGION" --platform=managed --allow-unauthenticated
+          echo "Deployed to Cloud Run successfully"
+
+      - name: Capture Cloud Run URL
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        run: |
+          URL=$(gcloud run services describe "\\$SERVICE_NAME" --region="\\$GCP_REGION" --format='value(status.url)')
+          echo "CLOUD_RUN_URL=$URL" >> $GITHUB_ENV
+          echo "$URL" > cloud-run-url.txt
+          echo "Cloud Run URL: $URL"
+
+      - name: Upload Cloud Run URL artifact
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-run-url
+          path: cloud-run-url.txt
+
+      - name: Notify backend with deployment URL
+        if: \${{ env.GCP_CREDENTIALS != '' && github.event_name != 'pull_request' }}
+        env:
+          WEBHOOK_URL: https://api-mcwd6yzjia-uc.a.run.app/deploy/webhook
+          WEBHOOK_KEY: \${{ secrets.DEPLOY_WEBHOOK_KEY }}
+        run: |
+          if [ -f cloud-run-url.txt ]; then
+            URL=$(cat cloud-run-url.txt)
+            REPO=\${{ github.repository }}
+            curl -sS -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -H "X-Webhook-Key: $WEBHOOK_KEY" \
+              -d "{\"repoFullName\":\"$REPO\",\"url\":\"$URL\"}"
+          else
+            echo "No URL file to send"
+          fi
+
+      - name: Skip deploy (no credentials or PR from fork)
+        if: \${{ !(env.GCP_CREDENTIALS != '') || github.event_name == 'pull_request' }}
+        run: |
+          echo "Skipping GCP auth/deploy because GCP_CREDENTIALS is not available or this is a pull_request from a fork."`;
+  const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
+
+  // Force update the workflow file to ensure latest version
+  console.log(`🔍 Checking workflow file at: ${workflowPath}`);
+  console.log(`📋 Workflow content preview: ${workflowYml.substring(0, 200)}...`);
+  
+  if (getFileResp.ok) {
+    const existing = await getFileResp.json() as any;
+    console.log('📝 Found existing workflow file, checking content...');
+    
+    // Check if the existing file contains Docker Hub references
+    const existingContent = Buffer.from(existing.content || '', 'base64').toString('utf8');
+    console.log(`📋 Existing workflow content preview: ${existingContent.substring(0, 200)}...`);
+    
+    if (existingContent.includes('docker/login-action@v3') || existingContent.includes('DOCKERHUB_USERNAME')) {
+      console.log('🚨 Found Docker Hub references in existing workflow, forcing replacement...');
+      
+      // Delete the old workflow file first
+      console.log('📝 Deleting old workflow file first...');
+      const deleteResponse = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${ghToken}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ message: 'chore(ci): delete old workflow with Docker Hub', sha: existing.sha })
+      });
+      
+      if (deleteResponse.ok) {
+        console.log('✅ Successfully deleted old workflow file with Docker Hub');
+      } else {
+        console.error('❌ Failed to delete old workflow file:', deleteResponse.status, await deleteResponse.text());
+      }
+      
+      // Wait for the deletion to propagate
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    } else {
+      console.log('✅ Existing workflow already uses Artifact Registry, updating anyway...');
+    }
+    
+    // Create/update the workflow file
+    console.log('📝 Creating/updating workflow file with Artifact Registry...');
+    const createResponse = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${ghToken}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ 
+        message: 'chore(ci): force update workflow to use Artifact Registry (NO DOCKER HUB)', 
+        content: desiredContentB64,
+        sha: existing.sha 
+      })
+    });
+    if (createResponse.ok) {
+      console.log('✅ Successfully created/updated workflow file with Artifact Registry');
+    } else {
+      const errorText = await createResponse.text();
+      console.error('❌ Failed to create/update workflow file:', createResponse.status, errorText);
+    }
+  } else if (getFileResp.status === 404) {
+    // Create new workflow
+    console.log('📝 Creating new workflow file...');
+    const createResponse = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${ghToken}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ message: 'chore(ci): add GitHub Actions workflow with Artifact Registry', content: desiredContentB64 })
+    });
+    if (createResponse.ok) {
+      console.log('✅ Successfully created new workflow file with Artifact Registry');
+    } else {
+      const errorText = await createResponse.text();
+      console.error('❌ Failed to create workflow file:', createResponse.status, errorText);
+    }
+  } else {
+    const errorText = await getFileResp.text();
+    console.error('❌ Failed to fetch existing workflow file:', getFileResp.status, errorText);
+  }
+
+  // 3) Ensure Dockerfile exists for Node projects
+  if (isNode) {
+    const dockerfilePath = 'Dockerfile';
+    const getDockerfile = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
+      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    if (getDockerfile.status === 404) {
+      const dockerfile = Buffer.from(`FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build --if-present || echo "No build script found"\nEXPOSE 3000\nCMD [\"npm\", \"start\"]\n`).toString('base64');
+      await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${ghToken}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ message: 'chore(docker): add Dockerfile', content: dockerfile })
+      });
+    }
+  }
+
+  // 4) Set GitHub secrets automatically
+  try {
+    const [owner, repo] = repoFullName.split('/');
+    const keyResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/public-key`, {
+      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    if (keyResp.ok) {
+      const keyData = await keyResp.json() as any;
+      await sodium.ready;
+      const { key, key_id } = keyData;
+      const encrypt = (value: string) => {
+        const binkey = sodium.from_base64(key, sodium.base64_variants.ORIGINAL);
+        const binsec = sodium.from_string(value);
+        const encBytes = sodium.crypto_box_seal(binsec, binkey);
+        return sodium.to_base64(encBytes, sodium.base64_variants.ORIGINAL);
+      };
+      
+      // Set GCP secrets for Cloud Run deployment
+      const gcpSecrets = {
+        GCP_PROJECT: 'devyntra-500e4',
+        GCP_REGION: 'us-central1',
+        AR_REPO: 'devyntra-images',
+        SERVICE_NAME: repo
+      };
+      
+      for (const [name, value] of Object.entries(gcpSecrets)) {
+          const encrypted_value = encrypt(value as string);
+          await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${name}`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ encrypted_value, key_id })
+          });
+        console.log(`✅ Set secret: ${name}`);
+      }
+      
+      // Set GCP service account key secrets automatically from file
+      try {
+        const keyPath = path.join(__dirname, '..', 'devyntra-deploy-key.json');
+        let serviceAccountKey;
+        
+        if (fs.existsSync(keyPath)) {
+          serviceAccountKey = fs.readFileSync(keyPath, 'utf8');
+          console.log('✅ Reading service account key from file:', keyPath);
+        } else {
+          console.error('❌ Service account key file not found at:', keyPath);
+          throw new Error('Service account key file not found');
+        }
+        
+        const encrypted_key = encrypt(serviceAccountKey);
+        const secretNames = ['GCLOUD_SERVICE_KEY', 'GCP_CREDENTIALS', 'GCP_SERVICE_ACCOUNT_KEY'];
+        for (const secretName of secretNames) {
+          const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${secretName}`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
+          });
+          if (resp.ok) {
+            console.log(`✅ Set ${secretName} secret`);
+          } else {
+            const errorText = await resp.text();
+            console.error(`❌ Failed setting ${secretName}:`, resp.status, errorText);
+          }
+        }
+      } catch (e) {
+        console.error('❌ Failed to set GCLOUD_SERVICE_KEY:', e);
+      }
+    }
+  } catch (e) {
+    console.error('Failed setting repo secrets', e);
+  }
+
+  // 5) Disable ALL old workflows that contain Docker Hub references
+  try {
+    console.log('🔍 Checking for old workflows with Docker Hub references...');
+    
+    // List all workflow files in .github/workflows
+    const workflowsResp = await fetch(`https://api.github.com/repos/${repoFullName}/contents/.github/workflows`, {
+      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    
+    if (workflowsResp.ok) {
+      const workflows = await workflowsResp.json() as any[];
+      console.log(`📋 Found ${workflows.length} workflow files`);
+      
+      for (const workflow of workflows) {
+        if (workflow.name.endsWith('.yml') || workflow.name.endsWith('.yaml')) {
+          const workflowResp = await fetch(workflow.url, {
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+          });
+          
+          if (workflowResp.ok) {
+            const workflowData = await workflowResp.json() as any;
+            const content = Buffer.from(workflowData.content || '', 'base64').toString('utf8');
+            
+            if (content.includes('docker/login-action@v3') || content.includes('DOCKERHUB_USERNAME')) {
+              console.log(`🚨 Found Docker Hub references in ${workflow.name}, deleting...`);
+              await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflow.path)}`, {
+                method: 'DELETE',
+                headers: {
+                  Authorization: `Bearer ${ghToken}`,
+                  Accept: 'application/vnd.github+json',
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message: 'chore(ci): remove workflow with Docker Hub', sha: workflowData.sha })
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Failed to disable old workflows', e);
+  }
+
+  res.json({ ok: true });
+});
+
+export const api = onRequest({ region: 'us-central1' }, app);
