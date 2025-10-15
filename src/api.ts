@@ -1,7 +1,8 @@
 import { auth } from '../firebase';
 
-// Backend API base URL (Cloud Run URL from latest deploy)
-const baseUrl = 'https://api-mcwd6yzjia-uc.a.run.app';
+// Backend API base URL
+// Prefer build-time env (set via Vite: VITE_API_BASE_URL), fallback to last-known URL
+const baseUrl: string = (import.meta as any)?.env?.VITE_API_BASE_URL || 'https://api-mcwd6yzjia-uc.a.run.app';
 
 async function authHeader() {
   const user = auth.currentUser;

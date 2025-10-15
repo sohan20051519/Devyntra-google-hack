@@ -14,6 +14,7 @@ env:
   PROJECT_NUMBER: 583516794481
   REGION: us-central1
   SERVICE_NAME: devyntra-web
+  NODE_VERSION: '20'
 
 jobs:
   deploy:
@@ -36,7 +37,7 @@ jobs:
 
       - name: Build container with Cloud Buildpacks (source build)
         run: |
-          IMAGE="us-central1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${SERVICE_NAME}:$GITHUB_SHA"
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${SERVICE_NAME}:$GITHUB_SHA"
           gcloud builds submit --pack image="$IMAGE" .
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
@@ -47,3 +48,32 @@ jobs:
             --region="$REGION" \
             --platform=managed \
             --allow-unauthenticated
+
+      - name: Obtain Cloud Run URL
+        id: runurl
+        run: |
+          URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')
+          echo "api_url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            functions/package-lock.json
+
+      - name: Install Firebase CLI
+        run: npm i -g firebase-tools@13
+
+      - name: Install root deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Build web with API base URL
+        env:
+          VITE_API_BASE_URL: ${{ steps.runurl.outputs.api_url }}
+        run: npm run build
+
+      - name: Deploy Hosting (Frontend)
+        run: firebase deploy --project "$PROJECT_ID" --only hosting --non-interactive --force
