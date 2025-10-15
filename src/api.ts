@@ -63,6 +63,14 @@ export async function getDeployStatus(repoFullName: string): Promise<{ status: s
   return res.json();
 }
 
+export async function listDeployments(): Promise<{ repoFullName: string; url: string | null; updatedAt: string | null }[]> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/deployments`, { headers });
+  if (!res.ok) throw new Error('Failed to list deployments');
+  const data = await res.json();
+  return data.items as any[];
+}
+
 export async function devAiAsk(prompt: string): Promise<string> {
   const headers = await authHeader();
   const res = await fetch(`${baseUrl}/devai`, {

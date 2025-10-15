@@ -116,6 +116,50 @@ app.get('/projects', requireAuth, async (req, res) => {
   }
 });
 
+// List deployments (latest) for the authenticated user's repos
+app.get('/deployments', requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).uid as string;
+    const doc = await db.collection('githubTokens').doc(uid).get();
+    if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+    const token = (doc.data() as any).accessToken as string;
+
+    // 1) Fetch user's repos from GitHub (limit 100)
+    const response = await fetch('https://api.github.com/user/repos?per_page=100', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json'
+      }
+    });
+    const repos = await response.json() as any[];
+    if (!response.ok) return res.status(response.status).json(repos);
+
+    const fullNames: string[] = repos.map((r) => r.full_name as string);
+
+    // 2) For each repo, read latest deployment from Firestore if present
+    const results: { repoFullName: string; url: string | null; updatedAt: string | null }[] = [];
+    const tasks = fullNames.map(async (name) => {
+      const snap = await db.collection('deployments').doc(name).get();
+      const data = snap.exists ? (snap.data() as any) : null;
+      results.push({ repoFullName: name, url: data?.latestUrl || null, updatedAt: data?.updatedAt || null });
+    });
+    await Promise.all(tasks);
+
+    // 3) Sort by updatedAt desc (nulls last)
+    results.sort((a, b) => {
+      if (!a.updatedAt && !b.updatedAt) return 0;
+      if (!a.updatedAt) return 1;
+      if (!b.updatedAt) return -1;
+      return a.updatedAt > b.updatedAt ? -1 : 1;
+    });
+
+    res.json({ items: results });
+  } catch (e) {
+    console.error('list deployments error', e);
+    res.status(500).json({ error: 'Failed to list deployments' });
+  }
+});
+
 // GitHub user profile
 app.get('/github/me', requireAuth, async (req, res) => {
   const uid = (req as any).uid as string;
