@@ -1,8 +1,8 @@
-name: Firebase Deploy
+name: Firebase Deploy (CLI only)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
   workflow_call:
     inputs:

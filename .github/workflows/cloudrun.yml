@@ -1,4 +1,4 @@
-name: Cloud Run Deploy (dockerless)
+name: Cloud Run Deploy (source)
 
 on:
   push:
@@ -35,18 +35,12 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Build container with Cloud Buildpacks (source build)
-        run: |
-          IMAGE="${{ env.REGION }}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${SERVICE_NAME}:$GITHUB_SHA"
-          gcloud builds submit --pack image="$IMAGE" .
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-
-      - name: Deploy to Cloud Run
+      - name: Deploy to Cloud Run from source (no Docker)
         run: |
           gcloud run deploy "$SERVICE_NAME" \
-            --image="$IMAGE" \
-            --region="$REGION" \
-            --platform=managed \
+            --source . \
+            --region "$REGION" \
+            --platform managed \
             --allow-unauthenticated
 
       - name: Obtain Cloud Run URL
