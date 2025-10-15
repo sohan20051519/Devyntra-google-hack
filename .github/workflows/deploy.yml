@@ -1,92 +1,62 @@
-name: CI
+name: Firebase Deploy
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main, master ]
   workflow_dispatch:
-
-permissions:
-  contents: write
-  packages: write
 
 jobs:
   build_test_deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
     env:
-      GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-      GCP_REGION: ${{ secrets.GCP_REGION }}
-      AR_REPO: ${{ secrets.AR_REPO }}
-      SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
-      IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ secrets.AR_REPO }}/${{ github.event.repository.name }}:latest
+      PROJECT_ID: devyntra-500e4
+      PROJECT_NUMBER: 583516794481
+      NODE_VERSION: '20'
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Debug - List files
-        run: ls -la
-
-      - name: Check package.json
-        run: |
-          if [ -f package.json ]; then
-            echo "✅ package.json found"
-            cat package.json
-          else
-            echo "❌ package.json not found"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            functions/package-lock.json
 
-      - name: Install dependencies
-        run: |
-          echo "Installing dependencies..."
-          if [ -f package-lock.json ]; then
-            echo "Using npm ci (package-lock.json found)"
-            npm ci
-          else
-            echo "Using npm install (no package-lock.json found)"
-            npm install
-          fi
-          echo "Dependencies installed successfully"
-
-      - name: Run tests
-        run: |
-          echo "Running tests..."
-          npm test --if-present || echo "No tests found or tests failed"
-
-      - name: Build app
-        run: |
-          echo "Building app..."
-          npm run build --if-present || echo "No build script found"
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
         with:
-          project_id: ${{ secrets.GCP_PROJECT }}
-          service_account_key: ${{ secrets.GCLOUD_SERVICE_KEY }}
-          export_default_credentials: true
+          workload_identity_provider: projects/${{ env.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
 
-      - name: Configure Docker for Artifact Registry
-        run: |
-          echo "Configuring Docker for Artifact Registry..."
-          gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
-          echo "Docker configured successfully"
+      - name: Install Firebase CLI
+        run: npm i -g firebase-tools@13
 
-      - name: Build Docker image
-        run: |
-          echo "Building Docker image: $IMAGE"
-          docker build -t "$IMAGE" .
-          echo "Docker image built successfully"
+      - name: Install root dependencies
+        working-directory: ./
+        run: npm ci --no-audit --no-fund
 
-      - name: Push image to Artifact Registry
-        run: |
-          echo "Pushing Docker image to Artifact Registry..."
-          docker push "$IMAGE"
-          echo "Docker image pushed successfully"
+      - name: Build web (Vite)
+        run: npm run build
 
-      - name: Deploy to Cloud Run
+      - name: Install functions dependencies
+        working-directory: ./functions
+        run: npm ci --no-audit --no-fund
+
+      - name: Build functions (tsc)
+        working-directory: ./functions
+        run: npm run build
+
+      - name: Deploy to Firebase (Hosting + Functions)
+        env:
+          FIREBASE_CLI_EXPERIMENTS: webframeworks
         run: |
-          echo "Deploying to Cloud Run..."
-          gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$GCP_REGION" --platform=managed --allow-unauthenticated
-          echo "Deployed to Cloud Run successfully"
+          firebase deploy --project "$PROJECT_ID" --only hosting,functions --non-interactive --force

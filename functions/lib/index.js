@@ -167,7 +167,40 @@ app.post('/deploy', requireAuth, async (req, res) => {
     if (!isNode) {
         return res.status(400).json({ error: 'Unsupported repository type. A package.json was not found. Currently only Node.js repos are supported.' });
     }
-    // 2) Ensure workflow file exists - real build/test + Docker build/push
+    // 2) Detect Language & Framework (already done above), then Code Analysis phase
+    // Placeholder: use Jules to analyze before generating workflow
+    // 2a) Initialize Jules session early for AI-Powered Auto-Fix
+    let julesSessionId = null;
+    try {
+        const [owner, repo] = repoFullName.split('/');
+        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '').trim();
+        if (julesApiKeyValue) {
+            const prompt = `Analyze the repository ${repoFullName}. Detect framework, run install, tests, and propose minimal fixes to pass CI. Prepare commits but do not push yet.`;
+            const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
+                body: JSON.stringify({
+                    prompt,
+                    sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: defaultBranch } },
+                    title: `Devyntra analysis: ${repoFullName}`
+                })
+            });
+            if (julesResp.ok) {
+                const julesData = await julesResp.json();
+                julesSessionId = (julesData.name || julesData.id || '').toString();
+                console.log('✅ Jules session created (analysis):', julesSessionId);
+            }
+            else {
+                console.error('❌ Failed to create Jules session (analysis):', await julesResp.text());
+            }
+        }
+    }
+    catch (e) {
+        console.error('Jules analysis session error', e);
+    }
+    // 3) AI-Powered Auto-Fix step (deferred: user may trigger actual fix via /jules/send)
+    // 4) Push Changes to Main will be handled by Jules when user confirms; we do not push here
+    // 5) Generate CI/CD Pipeline (GitHub Actions) but do NOT auto-dispatch yet
     const workflowPath = '.github/workflows/deploy.yml';
     const getFileResp = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
         headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
@@ -346,7 +379,7 @@ jobs:
         const errorText = await getFileResp.text();
         console.error('❌ Failed to fetch existing workflow file:', getFileResp.status, errorText);
     }
-    // 3) Ensure Dockerfile exists for Node projects
+    // 6) Install Dependencies handled in workflow; Ensure Dockerfile exists now
     if (isNode) {
         const dockerfilePath = 'Dockerfile';
         const getDockerfile = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
@@ -365,7 +398,7 @@ jobs:
             });
         }
     }
-    // 4) Set GitHub secrets automatically
+    // 7) Set GitHub secrets automatically
     try {
         const [owner, repo] = repoFullName.split('/');
         const keyResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/public-key`, {
@@ -404,7 +437,7 @@ jobs:
     catch (e) {
         console.error('Failed setting repo secrets', e);
     }
-    // 5) Disable ALL old workflows that contain Docker Hub references
+    // 8) Disable ALL old workflows that contain Docker Hub references
     try {
         console.log('🔍 Checking for old workflows with Docker Hub references...');
         // List all workflow files in .github/workflows
@@ -442,39 +475,7 @@ jobs:
     catch (e) {
         console.error('Failed to disable old workflows', e);
     }
-    // 6) Start Jules session for analysis/fix/logs
-    let julesSessionId = null;
-    try {
-        const [owner, repo] = repoFullName.split('/');
-        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || process.env.JULES_KEY || '').trim();
-        if (julesApiKeyValue) {
-            const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
-            const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
-                body: JSON.stringify({
-                    prompt,
-                    sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: defaultBranch } },
-                    title: `Devyntra deploy: ${repoFullName}`
-                })
-            });
-            if (julesResp.ok) {
-                const julesData = await julesResp.json();
-                julesSessionId = (julesData.name || julesData.id || '').toString();
-                console.log('✅ Jules session created:', julesSessionId);
-            }
-            else {
-                console.error('❌ Failed to create Jules session:', await julesResp.text());
-            }
-        }
-        else {
-            console.log('⚠️ Jules API key not configured');
-        }
-    }
-    catch (e) {
-        console.error('Jules session error', e);
-    }
-    // 7) Simulate GCP deploy step (as requested, keep production deploy simulated; other steps real)
+    // 9) Simulate GCP deploy step (final)
     const deploymentUrl = `https://cloud-run-simulated.devyntra.app/${encodeURIComponent(repoFullName)}`;
     res.json({
         detectedStack: isNode ? 'node' : 'unknown',
