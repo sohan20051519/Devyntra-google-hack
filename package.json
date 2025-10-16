@@ -1,0 +1,55 @@
+{
+  "name": "devyntra-complete-automation",
+  "version": "1.0.0",
+  "description": "Complete automation system for Devyntra deployment with zero manual setup",
+  "main": "scripts/automate-setup.js",
+  "scripts": {
+    "start": "node scripts/auto-start.js",
+    "auto-start": "bash startup.sh",
+    "auto-inject": "node scripts/auto-inject.js",
+    "setup": "node scripts/automate-setup.js",
+    "deploy": "node scripts/auto-deploy.js",
+    "setup-github": "node scripts/github-api-setup.js",
+    "api-automation": "node scripts/api-automation.js",
+    "full-setup": "npm run setup && echo 'Run: npm run setup-github <token> <owner> <repo>'",
+    "quick-deploy": "bash scripts/deploy.sh",
+    "shell-setup": "bash setup-automation.sh",
+    "fix-everything": "node scripts/fix-everything.js",
+    "health-check": "node scripts/system-health-check.js",
+    "help": "echo 'Available commands: start, auto-inject, setup, deploy, setup-github, api-automation, full-setup, quick-deploy, shell-setup, fix-everything, health-check'",
+    "fix-artifact-registry": "echo 'Use GitHub Actions workflow: artifact-registry-fix.yml'",
+    "test": "node scripts/auto-deploy.js --dry-run",
+    "postinstall": "node scripts/auto-start.js"
+  },
+  "keywords": [
+    "automation",
+    "deployment",
+    "google-cloud",
+    "github-actions",
+    "docker",
+    "cloud-run",
+    "artifact-registry",
+    "ci-cd",
+    "zero-manual-setup"
+  ],
+  "author": "Devyntra Automation Team",
+  "license": "MIT",
+  "dependencies": {
+    "child_process": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/devyntra-automation.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/devyntra-automation/issues"
+  },
+  "homepage": "https://github.com/your-username/devyntra-automation#readme"
+}

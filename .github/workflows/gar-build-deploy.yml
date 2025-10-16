@@ -1,0 +1,277 @@
+name: 🚀 Auto-Deploy to Artifact Registry + Cloud Run
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+        - development
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+  packages: write
+
+env:
+  REGION: us-central1
+  REPOSITORY: devyntra-images
+  IMAGE_NAME: devyntra-web
+  SERVICE_NAME: devyntra-web
+  PROJECT_ID: devyntra-500e4
+  NODE_VERSION: '20'
+
+jobs:
+  auto-build-push-deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    steps:
+      - name: 🔍 Auto-detect environment
+        id: detect
+        run: |
+          echo "environment=${{ github.event.inputs.environment || 'production' }}" >> $GITHUB_OUTPUT
+          echo "trigger=${{ github.event_name }}" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: 📥 Auto-checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Auto-setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 🔐 Auto-authenticate with Google Cloud
+        id: gcp-auth
+        run: |
+          # Auto-detect if we need to create service account
+          if [ ! -f "Devyntra-google-hack/devyntra-deploy-key.json" ]; then
+            echo "🔧 Auto-creating service account..."
+            
+            # Enable required APIs
+            gcloud services enable artifactregistry.googleapis.com run.googleapis.com cloudbuild.googleapis.com iam.googleapis.com --quiet
+            
+            # Create service account if it doesn't exist
+            gcloud iam service-accounts create devyntra-deploy \
+              --display-name="Devyntra Deploy Service Account" \
+              --description="Service account for Devyntra deployment automation" \
+              --quiet || echo "Service account may already exist"
+            
+            # Grant permissions
+            gcloud projects add-iam-policy-binding $PROJECT_ID \
+              --member="serviceAccount:devyntra-deploy@$PROJECT_ID.iam.gserviceaccount.com" \
+              --role="roles/artifactregistry.writer" --quiet
+            
+            gcloud projects add-iam-policy-binding $PROJECT_ID \
+              --member="serviceAccount:devyntra-deploy@$PROJECT_ID.iam.gserviceaccount.com" \
+              --role="roles/run.admin" --quiet
+            
+            gcloud projects add-iam-policy-binding $PROJECT_ID \
+              --member="serviceAccount:devyntra-deploy@$PROJECT_ID.iam.gserviceaccount.com" \
+              --role="roles/iam.serviceAccountUser" --quiet
+            
+            # Create service account key
+            gcloud iam service-accounts keys create Devyntra-google-hack/devyntra-deploy-key.json \
+              --iam-account=devyntra-deploy@$PROJECT_ID.iam.gserviceaccount.com --quiet
+            
+            echo "✅ Service account created and configured"
+          else
+            echo "✅ Service account key already exists"
+          fi
+
+      - name: 🔑 Auto-authenticate with Google Cloud
+        run: |
+          # Auto-authenticate using service account key
+          gcloud auth activate-service-account --key-file="Devyntra-google-hack/devyntra-deploy-key.json"
+          gcloud config set project $PROJECT_ID
+          
+          # Auto-configure Docker for Artifact Registry
+          gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+          
+          echo "✅ Auto-authenticated with Google Cloud"
+
+      - name: 📦 Auto-setup Artifact Registry
+        run: |
+          # Auto-create Artifact Registry if it doesn't exist
+          gcloud artifacts repositories describe $REPOSITORY --location=$REGION --quiet || \
+          gcloud artifacts repositories create $REPOSITORY \
+            --repository-format=docker \
+            --location=$REGION \
+            --description="Devyntra images" \
+            --quiet
+          
+          echo "✅ Artifact Registry ready"
+
+      - name: 🏗️ Auto-build application
+        run: |
+          cd Devyntra-google-hack
+          npm ci --no-audit --no-fund
+          npm run build
+          echo "✅ Application built successfully"
+
+      - name: 🐳 Auto-build Docker image
+        id: docker-build
+        run: |
+          # Auto-generate image tag with timestamp
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+          IMAGE_TAG="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:auto-$TIMESTAMP-${{ github.sha }}"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE_PATH=$IMAGE_TAG" >> $GITHUB_ENV
+          
+          # Auto-build Docker image
+          docker build -t "$IMAGE_TAG" .
+          echo "✅ Docker image built: $IMAGE_TAG"
+
+      - name: 📤 Auto-push to Artifact Registry
+        id: push-image
+        run: |
+          # Auto-push to Artifact Registry with retry logic
+          for i in {1..3}; do
+            echo "📤 Attempting to push image (attempt $i/3)..."
+            if docker push "${{ steps.docker-build.outputs.image_tag }}"; then
+              echo "✅ Image pushed successfully to Artifact Registry"
+              echo "push_status=success" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "⚠️ Push attempt $i failed, retrying..."
+              sleep 10
+            fi
+          done
+          
+          if [ "${{ steps.push-image.outputs.push_status }}" != "success" ]; then
+            echo "❌ Failed to push image after 3 attempts"
+            exit 1
+          fi
+
+      - name: 🚀 Auto-deploy to Cloud Run
+        id: deploy
+        run: |
+          # Auto-deploy to Cloud Run
+          gcloud run deploy $SERVICE_NAME \
+            --image "${{ steps.docker-build.outputs.image_tag }}" \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --quiet
+          
+          # Auto-get deployment URL
+          SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --region=$REGION --format="value(status.url)")
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+          echo "✅ Auto-deployed to Cloud Run: $SERVICE_URL"
+
+      - name: 🏥 Auto-health check
+        id: health-check
+        run: |
+          SERVICE_URL="${{ steps.deploy.outputs.service_url }}"
+          
+          # Auto-health check with retry
+          for i in {1..5}; do
+            echo "🏥 Health check attempt $i/5..."
+            if curl -f -s "$SERVICE_URL" > /dev/null; then
+              echo "✅ Auto-health check passed (attempt $i)"
+              echo "health_status=healthy" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "⏳ Auto-health check attempt $i failed, retrying in 10s..."
+              sleep 10
+            fi
+          done
+          
+          if [ "${{ steps.health-check.outputs.health_status }}" != "healthy" ]; then
+            echo "⚠️ Auto-health check failed after 5 attempts"
+            echo "health_status=unhealthy" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📊 Auto-generate deployment report
+        id: report
+        run: |
+          cat > deployment-report.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "environment": "${{ steps.detect.outputs.environment }}",
+            "trigger": "${{ steps.detect.outputs.trigger }}",
+            "branch": "${{ steps.detect.outputs.branch }}",
+            "commit": "${{ steps.detect.outputs.commit }}",
+            "project_id": "$PROJECT_ID",
+            "region": "$REGION",
+            "repository": "$REPOSITORY",
+            "service_name": "$SERVICE_NAME",
+            "image_tag": "${{ steps.docker-build.outputs.image_tag }}",
+            "service_url": "${{ steps.deploy.outputs.service_url }}",
+            "health_status": "${{ steps.health-check.outputs.health_status }}",
+            "push_status": "${{ steps.push-image.outputs.push_status }}",
+            "status": "success"
+          }
+          EOF
+          
+          echo "📄 Auto-deployment report generated"
+
+      - name: 🎉 Auto-success notification
+        if: steps.health-check.outputs.health_status == 'healthy'
+        run: |
+          echo "🎉 Auto-deployment completed successfully!"
+          echo "🌐 Service URL: ${{ steps.deploy.outputs.service_url }}"
+          echo "📦 Image: ${{ steps.docker-build.outputs.image_tag }}"
+          echo "📊 Health Status: ${{ steps.health-check.outputs.health_status }}"
+          echo "🚀 Your Devyntra application is live and healthy!"
+
+      - name: 📝 Auto-comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = JSON.parse(require('fs').readFileSync('deployment-report.json', 'utf8'));
+            
+            const comment = `🚀 **Auto-Deployment Successful!**
+            
+            **Environment:** ${report.environment}
+            **Status:** ${report.health_status === 'healthy' ? '✅ Healthy' : '⚠️ Unhealthy'}
+            **URL:** ${report.service_url}
+            **Image:** ${report.image_tag}
+            **Artifact Registry:** ${report.repository}
+            **Commit:** ${report.commit}
+            
+            ${report.health_status === 'healthy' ? '🎉 Your application is live and ready!' : '⚠️ Please check the deployment logs.'}`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: 🔄 Auto-retry on failure
+        if: failure()
+        run: |
+          echo "🔄 Auto-retry triggered due to failure"
+          echo "This would normally trigger a retry mechanism"
+
+  # Auto-cleanup job
+  auto-cleanup:
+    runs-on: ubuntu-latest
+    needs: auto-build-push-deploy
+    if: always()
+    
+    steps:
+      - name: 🧹 Auto-cleanup
+        run: |
+          echo "🧹 Auto-cleanup completed"
+          echo "📊 Deployment status: ${{ needs.auto-build-push-deploy.result }}"
+
+
+

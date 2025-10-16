@@ -1,0 +1,135 @@
+name: 🔧 Artifact Registry Push Fix
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGION: us-central1
+  REPOSITORY: devyntra-images
+  IMAGE_NAME: devyntra-web
+  PROJECT_ID: devyntra-500e4
+
+jobs:
+  fix-artifact-registry-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔐 Auto-authenticate with Google Cloud
+        run: |
+          # Use service account key if available
+          if [ -f "Devyntra-google-hack/devyntra-deploy-key.json" ]; then
+            echo "🔑 Using existing service account key..."
+            gcloud auth activate-service-account --key-file="Devyntra-google-hack/devyntra-deploy-key.json"
+            gcloud config set project $PROJECT_ID
+          else
+            echo "❌ Service account key not found"
+            exit 1
+          fi
+
+      - name: 📦 Ensure Artifact Registry exists
+        run: |
+          # Create Artifact Registry if it doesn't exist
+          gcloud artifacts repositories describe $REPOSITORY --location=$REGION --quiet || \
+          gcloud artifacts repositories create $REPOSITORY \
+            --repository-format=docker \
+            --location=$REGION \
+            --description="Devyntra images" \
+            --quiet
+          
+          echo "✅ Artifact Registry ready"
+
+      - name: 🐳 Configure Docker for Artifact Registry
+        run: |
+          # Configure Docker to use gcloud as credential helper
+          gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+          
+          # Verify Docker configuration
+          echo "🔍 Docker configuration:"
+          cat ~/.docker/config.json || echo "No Docker config found"
+          
+          echo "✅ Docker configured for Artifact Registry"
+
+      - name: 🏗️ Build Docker image
+        id: build
+        run: |
+          # Generate unique image tag
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+          IMAGE_TAG="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:fix-$TIMESTAMP-${{ github.sha }}"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE_PATH=$IMAGE_TAG" >> $GITHUB_ENV
+          
+          # Build Docker image
+          docker build -t "$IMAGE_TAG" .
+          echo "✅ Docker image built: $IMAGE_TAG"
+
+      - name: 📤 Push to Artifact Registry (with retry)
+        id: push
+        run: |
+          echo "📤 Pushing image to Artifact Registry..."
+          
+          # Push with retry logic
+          for i in {1..5}; do
+            echo "🔄 Push attempt $i/5..."
+            
+            if docker push "${{ steps.build.outputs.image_tag }}"; then
+              echo "✅ Image pushed successfully to Artifact Registry"
+              echo "push_status=success" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "⚠️ Push attempt $i failed"
+              if [ $i -lt 5 ]; then
+                echo "⏳ Waiting 15 seconds before retry..."
+                sleep 15
+                
+                # Re-authenticate Docker if needed
+                echo "🔑 Re-authenticating Docker..."
+                gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+              fi
+            fi
+          done
+          
+          if [ "${{ steps.push.outputs.push_status }}" != "success" ]; then
+            echo "❌ Failed to push image after 5 attempts"
+            echo "🔍 Debugging information:"
+            echo "Docker config:"
+            cat ~/.docker/config.json || echo "No Docker config"
+            echo "Gcloud auth list:"
+            gcloud auth list
+            echo "Artifact Registry permissions:"
+            gcloud artifacts repositories get-iam-policy $REPOSITORY --location=$REGION || echo "Could not get IAM policy"
+            exit 1
+          fi
+
+      - name: 🎉 Success notification
+        if: steps.push.outputs.push_status == 'success'
+        run: |
+          echo "🎉 Artifact Registry push successful!"
+          echo "📦 Image: ${{ steps.build.outputs.image_tag }}"
+          echo "📦 Registry: $REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY"
+          echo "🚀 Your Docker image is now available in Artifact Registry!"
+
+      - name: 🔍 Debug on failure
+        if: failure()
+        run: |
+          echo "🔍 Debugging failed push..."
+          echo "Docker version:"
+          docker --version
+          echo "Gcloud version:"
+          gcloud --version
+          echo "Docker config:"
+          cat ~/.docker/config.json || echo "No Docker config"
+          echo "Gcloud auth list:"
+          gcloud auth list
+          echo "Project info:"
+          gcloud config get-value project
+          echo "Artifact Registry info:"
+          gcloud artifacts repositories describe $REPOSITORY --location=$REGION || echo "Could not describe repository"

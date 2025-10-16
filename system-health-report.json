@@ -1,0 +1,55 @@
+{
+  "frontend": {
+    "status": "error",
+    "details": [
+      "✅ All required dependencies present",
+      "❌ Build failed"
+    ]
+  },
+  "backend": {
+    "status": "healthy",
+    "details": [
+      "✅ All required dependencies present",
+      "✅ Functions build successful"
+    ]
+  },
+  "firebase": {
+    "status": "healthy",
+    "details": [
+      "✅ Hosting configuration present",
+      "✅ Functions configuration present",
+      "✅ Firebase project configuration present"
+    ]
+  },
+  "gcloud": {
+    "status": "healthy",
+    "details": [
+      "✅ Google Cloud SDK installed",
+      "✅ Google Cloud authenticated",
+      "✅ Project set: devyntra-500e4"
+    ]
+  },
+  "cloudrun": {
+    "status": "error",
+    "details": [
+      "❌ Cloud Run service not found"
+    ]
+  },
+  "docker": {
+    "status": "error",
+    "details": [
+      "❌ Docker not found"
+    ]
+  },
+  "github": {
+    "status": "healthy",
+    "details": [
+      "✅ 5 workflow(s) found",
+      "✅ Git repository initialized"
+    ]
+  },
+  "overall": {
+    "status": "fair",
+    "score": 57
+  }
+}
