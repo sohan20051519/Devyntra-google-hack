@@ -21,7 +21,23 @@ const genaiApiKey = defineSecret('GENAI_API_KEY');
 const julesApiKey = defineSecret('JULES_API_KEY');
 
 const app = express();
-app.use(cors({ origin: true }));
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:4173',
+  'https://devyntra.web.app',
+  'https://devyntra-500e4.web.app',
+  'https://devyntra-google-hack-583516794481.europe-west1.run.app'
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+}));
 app.use(express.json());
 
 function requireAuth(req: any, res: any, next: any) {
