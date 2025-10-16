@@ -313,11 +313,23 @@ jobs:
           echo "Building app..."
           npm run build --if-present || echo "No build script found"
 
+      - name: Authenticate to Google Cloud (WIF)
+        if: \${{ secrets.GCLOUD_SERVICE_KEY == '' && secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_WIF_SERVICE_ACCOUNT != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: \${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: \${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Authenticate to Google Cloud (Key)
+        if: \${{ secrets.GCLOUD_SERVICE_KEY != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: \${{ secrets.GCLOUD_SERVICE_KEY }}
+
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: \${{ secrets.GCP_PROJECT }}
-          service_account_key: \${{ secrets.GCLOUD_SERVICE_KEY }}
           export_default_credentials: true
 
       - name: Configure Docker for Artifact Registry
@@ -326,10 +338,38 @@ jobs:
           gcloud auth configure-docker "\$GCP_REGION-docker.pkg.dev" --quiet
           echo "Docker configured successfully"
 
+      - name: Ensure Dockerfile
+        run: |
+          DOCKERFILE_PATH="Dockerfile"
+          if [ -f "./Dockerfile" ]; then
+            DOCKERFILE_PATH="Dockerfile"
+          elif [ -f "./app/Dockerfile" ]; then
+            DOCKERFILE_PATH="app/Dockerfile"
+          elif [ -f "./docker/Dockerfile" ]; then
+            DOCKERFILE_PATH="docker/Dockerfile"
+          elif [ -f "./deploy/Dockerfile" ]; then
+            DOCKERFILE_PATH="deploy/Dockerfile"
+          elif [ -f "./.devcontainer/Dockerfile" ]; then
+            DOCKERFILE_PATH=".devcontainer/Dockerfile"
+          else
+            echo "Dockerfile missing. Creating a minimal one at repo root..."
+            echo "FROM node:20-alpine" > Dockerfile
+            echo "WORKDIR /app" >> Dockerfile
+            echo "COPY package*.json ./" >> Dockerfile
+            echo "RUN npm ci || npm install" >> Dockerfile
+            echo "COPY . ." >> Dockerfile
+            echo "RUN npm run build --if-present || echo \"No build script found\"" >> Dockerfile
+            echo "EXPOSE 3000" >> Dockerfile
+            echo "CMD [\"npm\",\"start\"]" >> Dockerfile
+            DOCKERFILE_PATH="Dockerfile"
+          fi
+          echo "DOCKERFILE_PATH=$DOCKERFILE_PATH" >> "$GITHUB_ENV"
+
       - name: Build Docker image
         run: |
           echo "Building Docker image: \$IMAGE"
-          docker build -t "\$IMAGE" .
+          echo "Using Dockerfile: \${DOCKERFILE_PATH}"
+          docker build -f "\${DOCKERFILE_PATH}" -t "\$IMAGE" .
           echo "Docker image built successfully"
 
       - name: Push image to Artifact Registry
@@ -482,9 +522,41 @@ jobs:
           });
         console.log(`✅ Set secret: ${name}`);
       }
-      
-      // Skip GCLOUD_SERVICE_KEY setup for now - not essential for basic deployment
-      console.log('⚠️ Skipping GCLOUD_SERVICE_KEY setup (not essential for basic deployment)');
+
+      // Ensure WIF secrets and optionally GCLOUD_SERVICE_KEY
+      try {
+        // Always set WIF-based secrets so anyone can run CI without a key
+        const wifSecrets = {
+          GCP_WIF_PROVIDER: `projects/583516794481/locations/global/workloadIdentityPools/github-pool/providers/github`,
+          GCP_WIF_SERVICE_ACCOUNT: `devyntra-deploy@devyntra-500e4.iam.gserviceaccount.com`
+        };
+        for (const [name, value] of Object.entries(wifSecrets)) {
+          const encrypted_value = encrypt(String(value));
+          await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${name}`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ encrypted_value, key_id })
+          });
+          console.log(`✅ Set secret: ${name}`);
+        }
+
+        // Optionally set GCLOUD_SERVICE_KEY from local key file if present
+        const keyPath = path.join(process.cwd(), 'functions', 'devyntra-deploy-key.json');
+        if (fs.existsSync(keyPath)) {
+          const keyJson = fs.readFileSync(keyPath, 'utf8');
+          const encrypted_value = encrypt(keyJson);
+          await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCLOUD_SERVICE_KEY`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ encrypted_value, key_id })
+          });
+          console.log('✅ Set secret: GCLOUD_SERVICE_KEY');
+        } else {
+          console.log('ℹ️ GCLOUD_SERVICE_KEY file not found locally; skipping secret creation');
+        }
+      } catch (e) {
+        console.error('Failed to set GCLOUD_SERVICE_KEY', e);
+      }
     }
   } catch (e) {
     console.error('Failed setting repo secrets', e);
