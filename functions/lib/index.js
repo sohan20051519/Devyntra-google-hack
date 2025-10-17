@@ -314,14 +314,14 @@ jobs:
           npm run build --if-present || echo "No build script found"
 
       - name: Authenticate to Google Cloud (WIF)
-        if: \${{ secrets.GCLOUD_SERVICE_KEY == '' && secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_WIF_SERVICE_ACCOUNT != '' }}
+        if: secrets.GCLOUD_SERVICE_KEY == '' && secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_WIF_SERVICE_ACCOUNT != ''
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: \${{ secrets.GCP_WIF_PROVIDER }}
           service_account: \${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Authenticate to Google Cloud (Key)
-        if: \${{ secrets.GCLOUD_SERVICE_KEY != '' }}
+        if: secrets.GCLOUD_SERVICE_KEY != ''
         uses: google-github-actions/auth@v2
         with:
           credentials_json: \${{ secrets.GCLOUD_SERVICE_KEY }}
