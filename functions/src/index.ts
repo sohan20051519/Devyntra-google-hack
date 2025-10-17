@@ -313,15 +313,28 @@ jobs:
           echo "Building app..."
           npm run build --if-present || echo "No build script found"
 
+      - name: Decide auth method
+        id: decide_auth
+        run: |
+          if [ -z "\${GCLOUD_SERVICE_KEY}" ] && [ -n "\${GCP_WIF_PROVIDER}" ] && [ -n "\${GCP_WIF_SERVICE_ACCOUNT}" ]; then
+            echo "use_wif=true" >> \$GITHUB_OUTPUT
+          else
+            echo "use_wif=false" >> \$GITHUB_OUTPUT
+          fi
+        env:
+          GCLOUD_SERVICE_KEY: \${{ secrets.GCLOUD_SERVICE_KEY }}
+          GCP_WIF_PROVIDER: \${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_WIF_SERVICE_ACCOUNT: \${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
       - name: Authenticate to Google Cloud (WIF)
-        if: secrets.GCLOUD_SERVICE_KEY == '' && secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_WIF_SERVICE_ACCOUNT != ''
+        if: steps.decide_auth.outputs.use_wif == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: \${{ secrets.GCP_WIF_PROVIDER }}
           service_account: \${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Authenticate to Google Cloud (Key)
-        if: secrets.GCLOUD_SERVICE_KEY != ''
+        if: steps.decide_auth.outputs.use_wif == 'false'
         uses: google-github-actions/auth@v2
         with:
           credentials_json: \${{ secrets.GCLOUD_SERVICE_KEY }}
