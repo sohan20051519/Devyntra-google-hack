@@ -116,7 +116,19 @@ app.post('/deploy', requireAuth, async (req, res) => {
     const getFileResp = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
         headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
     });
-    const workflowYml = `name: CI\n\non:\n  push:\n    branches: [ "main" ]\n  workflow_dispatch:\n\npermissions:\n  contents: write\n  packages: write\n\njobs:\n  build_test_deploy:\n    runs-on: ubuntu-latest\n    env:\n      GCP_PROJECT: \${{ secrets.GCP_PROJECT }}\n      GCP_REGION: \${{ secrets.GCP_REGION }}\n      AR_REPO: \${{ secrets.AR_REPO }}\n      SERVICE_NAME: \${{ secrets.SERVICE_NAME }}\n      IMAGE: \${{ secrets.GCP_REGION }}-docker.pkg.dev/\${{ secrets.GCP_PROJECT }}/\${{ secrets.AR_REPO }}/\${{ github.event.repository.name }}:latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n\n      - name: Install dependencies\n        run: npm ci || npm install\n\n      - name: Run tests\n        run: npm test --if-present\n\n      - name: Build app\n        run: npm run build --if-present\n\n      - name: Set up gcloud\n        uses: google-github-actions/setup-gcloud@v2\n        with:\n          project_id: \${{ secrets.GCP_PROJECT }}\n          service_account_key: \${{ secrets.GCLOUD_SERVICE_KEY }}\n          export_default_credentials: true\n\n      - name: Configure Docker for Artifact Registry\n        run: gcloud auth configure-docker "\$GCP_REGION-docker.pkg.dev" --quiet\n\n      - name: Build Docker image\n        run: docker build -t "\$IMAGE" .\n\n      - name: Push image to Artifact Registry\n        run: docker push "\$IMAGE"\n\n      - name: Deploy to Cloud Run\n        run: gcloud run deploy "\$SERVICE_NAME" --image="\$IMAGE" --region="\$GCP_REGION" --platform=managed --allow-unauthenticated\n`;
+    const [owner, repo] = repoFullName.split('/');
+    const gcpSecrets = {
+        GCP_PROJECT: 'devyntra-500e4',
+        GCP_REGION: 'us-central1',
+        AR_REPO: 'devyntra-images',
+        SERVICE_NAME: repo,
+        REPO_NAME: repo
+    };
+    const templatePath = path.join(__dirname, 'workflow-template.yml');
+    let workflowYml = fs.readFileSync(templatePath, 'utf8');
+    for (const [key, value] of Object.entries(gcpSecrets)) {
+        workflowYml = workflowYml.replace(new RegExp(`__${key}__`, 'g'), value);
+    }
     const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
     if (getFileResp.status === 404) {
         // Create new workflow
@@ -153,7 +165,7 @@ app.post('/deploy', requireAuth, async (req, res) => {
             headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
         });
         if (getDockerfile.status === 404) {
-            const dockerfile = Buffer.from(`FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nEXPOSE 3000\nCMD [\"npm\", \"start\"]\n`).toString('base64');
+            const dockerfile = Buffer.from(`FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nEXPOSE 3000\nCMD ["npm", "start"]\n`).toString('base64');
             await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
                 method: 'PUT',
                 headers: {
@@ -167,7 +179,6 @@ app.post('/deploy', requireAuth, async (req, res) => {
     }
     // 4) Set GitHub secrets automatically
     try {
-        const [owner, repo] = repoFullName.split('/');
         const keyResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/public-key`, {
             headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
         });
@@ -182,12 +193,6 @@ app.post('/deploy', requireAuth, async (req, res) => {
                 return sodium.to_base64(encBytes, sodium.base64_variants.ORIGINAL);
             };
             // Set GCP secrets for Cloud Run deployment
-            const gcpSecrets = {
-                GCP_PROJECT: 'devyntra-500e4',
-                GCP_REGION: 'us-central1',
-                AR_REPO: 'devyntra-images',
-                SERVICE_NAME: repo
-            };
             for (const [name, value] of Object.entries(gcpSecrets)) {
                 const encrypted_value = encrypt(value);
                 await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${name}`, {
@@ -245,7 +250,6 @@ app.post('/deploy', requireAuth, async (req, res) => {
     // 6) Start Jules session for analysis/fix/logs
     let julesSessionId = null;
     try {
-        const [owner, repo] = repoFullName.split('/');
         const julesApiKey = process.env.JULES_API_KEY || process.env.JULES_KEY || '';
         if (julesApiKey) {
             const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
