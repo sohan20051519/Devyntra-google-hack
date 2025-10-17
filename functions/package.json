@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Devyntra Firebase Functions",
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/workflow-template.yml lib/workflow-template.yml",
+    "build": "rm -rf lib && tsc -p tsconfig.json && cp src/workflow-template.yml lib/workflow-template.yml",
     "deploy": "npm run build && firebase deploy --only functions",
     "serve": "npm run build && firebase emulators:start --only functions",
     "start": "npm run serve",
