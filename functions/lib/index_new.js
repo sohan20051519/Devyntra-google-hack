@@ -8,6 +8,7 @@ import cors from 'cors';
 import sodium from 'libsodium-wrappers';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 if (getApps().length === 0) {
     initializeApp();
 }
@@ -124,6 +125,8 @@ app.post('/deploy', requireAuth, async (req, res) => {
         SERVICE_NAME: repo,
         REPO_NAME: repo
     };
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
     const templatePath = path.join(__dirname, 'workflow-template.yml');
     let workflowYml = fs.readFileSync(templatePath, 'utf8');
     for (const [key, value] of Object.entries(gcpSecrets)) {
