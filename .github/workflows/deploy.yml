@@ -1,39 +1,21 @@
-name: Firebase Deploy (CLI only)
+name: Firebase Deploy
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      project_id:
-        description: Firebase/GCP project ID
-        required: false
-        type: string
-        default: devyntra-500e4
-      project_number:
-        description: GCP project number
-        required: false
-        type: string
-        default: '583516794481'
-      node_version:
-        description: Node.js version
-        required: false
-        type: string
-        default: '20'
+
+permissions:
+  contents: 'read'
+  id-token: 'write'
 
 jobs:
-  build_test_deploy:
+  build_and_deploy:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      id-token: write
-
     env:
-      PROJECT_ID: ${{ inputs.project_id || 'devyntra-500e4' }}
-      PROJECT_NUMBER: ${{ inputs.project_number || '583516794481' }}
-      NODE_VERSION: ${{ inputs.node_version || '20' }}
+      PROJECT_ID: devyntra-500e4
+      PROJECT_NUMBER: 583516794481
+      NODE_VERSION: '20'
 
     steps:
       - name: Checkout
@@ -58,7 +40,6 @@ jobs:
         run: npm i -g firebase-tools@13
 
       - name: Install root dependencies
-        working-directory: ./
         run: npm ci --no-audit --no-fund
 
       - name: Build web (Vite)
