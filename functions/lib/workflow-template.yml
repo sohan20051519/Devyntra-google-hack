@@ -1,0 +1,95 @@
+name: CI
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build_test_deploy:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT: __GCP_PROJECT__
+      GCP_REGION: __GCP_REGION__
+      AR_REPO: __AR_REPO__
+      SERVICE_NAME: __SERVICE_NAME__
+      IMAGE: __GCP_REGION__-docker.pkg.dev/__GCP_PROJECT__/__AR_REPO__/__REPO_NAME__:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Run tests
+        run: npm test --if-present
+
+      - name: Build app
+        run: npm run build --if-present
+
+      - name: Check for secrets
+        id: check_secrets
+        run: |
+          if [ -z "${{ secrets.GCLOUD_SERVICE_KEY }}" ] && [ -n "${{ secrets.GCP_WIF_PROVIDER }}" ] && [ -n "${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}" ]; then
+            echo "use_wif=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_wif=false" >> $GITHUB_OUTPUT
+          fi
+          if [ -n "${{ secrets.GCLOUD_SERVICE_KEY }}" ]; then
+            echo "use_key=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_key=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Authenticate to Google Cloud (WIF)
+        if: steps.check_secrets.outputs.use_wif == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Authenticate to Google Cloud (Key)
+        if: steps.check_secrets.outputs.use_key == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCLOUD_SERVICE_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+          export_default_credentials: true
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+
+      - name: Ensure Dockerfile
+        run: |
+          if [ -f "./Dockerfile" ]; then
+            echo "Dockerfile found."
+          else
+            echo "Dockerfile not found. Creating a new one..."
+            echo 'FROM node:20-alpine' > Dockerfile
+            echo 'WORKDIR /app' >> Dockerfile
+            echo 'COPY package*.json ./' >> Dockerfile
+            echo 'RUN npm ci || npm install' >> Dockerfile
+            echo 'COPY . .' >> Dockerfile
+            echo 'RUN npm run build --if-present' >> Dockerfile
+            echo 'EXPOSE 3000' >> Dockerfile
+            echo 'CMD ["npm", "start"]' >> Dockerfile
+          fi
+
+      - name: Build Docker image
+        run: docker build -t "$IMAGE" .
+
+      - name: Push image to Artifact Registry
+        run: docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        run: gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$GCP_REGION" --platform=managed --allow-unauthenticated
