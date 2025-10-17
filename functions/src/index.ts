@@ -327,14 +327,14 @@ jobs:
           GCP_WIF_SERVICE_ACCOUNT: \${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Authenticate to Google Cloud (WIF)
-        if: steps.decide_auth.outputs.use_wif == 'true'
+        if: \${{ needs.deploy.outputs.use_wif == 'true' || steps.decide_auth.outputs.use_wif == 'true' }}
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: \${{ secrets.GCP_WIF_PROVIDER }}
           service_account: \${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Authenticate to Google Cloud (Key)
-        if: steps.decide_auth.outputs.use_wif == 'false'
+        if: \${{ needs.deploy.outputs.use_wif == 'false' || steps.decide_auth.outputs.use_wif == 'false' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: \${{ secrets.GCLOUD_SERVICE_KEY }}
