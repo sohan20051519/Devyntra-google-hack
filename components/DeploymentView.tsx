@@ -65,7 +65,7 @@ const DeploymentView: React.FC<DeploymentViewProps> = ({
  }) => {
   
   const isDeploymentFinished = !!deployedLink;
-  const showLogs = true;
+  const showLogs = isDeploying;
 
   return (
     <div className="max-w-4xl mx-auto">
