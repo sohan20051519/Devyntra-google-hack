@@ -11,66 +11,38 @@ export const MOCK_REPOS: Repository[] = [
 export const INITIAL_DEPLOYMENT_STEPS: DeploymentStep[] = [
   {
     id: 1,
-    title: 'Detect Language & Framework',
-    details: 'Analyzing repository structure to identify technology stack.',
+    title: 'Code Analysis & Fix',
+    details: 'Jules AI is analyzing your code, fixing errors, and pushing changes.',
     status: DeploymentStatus.PENDING,
-    log: 'repository_scan_initated... found package.json... detected React.js v18.2 with TypeScript.'
+    log: 'Jules AI agent deployed...'
   },
   {
     id: 2,
-    title: 'Code Analysis',
-    details: 'Scanning for potential errors, vulnerabilities, and code smells.',
-    status: DeploymentStatus.PENDING,
-    log: 'static_analysis_started... 124 files scanned... found 3 potential null pointer exceptions and 1 deprecated API call.'
-  },
-  {
-    id: 3,
-    title: 'AI-Powered Auto-Fix',
-    details: 'Using AI to automatically fix identified issues and improve code quality.',
-    status: DeploymentStatus.PENDING,
-    log: 'ai_fix_agent_deployed... patching null pointer checks... refactoring deprecated call to new API... generating explanations for changes.'
-  },
-  {
-    id: 4,
-    title: 'Push Changes to Main',
-    details: 'Committing and pushing automated fixes back to the main branch.',
-    status: DeploymentStatus.PENDING,
-    log: 'git_commit_-m_"fix(ai):_automated_code_quality_improvements"... git_push_origin_main... push_successful.'
-  },
-  {
-    id: 5,
     title: 'Install Dependencies',
     details: 'Setting up virtual environment and installing required packages.',
     status: DeploymentStatus.PENDING,
-    log: 'virtual_machine_provisioned... running_npm_install... found 1257 packages... dependencies installed successfully.'
+    log: ''
   },
   {
-    id: 6,
+    id: 3,
+    title: 'Build & Test',
+    details: 'Executing the CI/CD pipeline to ensure application integrity.',
+    status: DeploymentStatus.PENDING,
+    log: ''
+  },
+  {
+    id: 4,
     title: 'Create Docker Image',
     details: 'Building a containerized Docker image for consistent deployment.',
     status: DeploymentStatus.PENDING,
-    log: 'writing_dockerfile... RUN_npm_install... EXPOSE_3000... docker_build_-t_app:latest_... image created successfully.'
+    log: ''
   },
   {
-    id: 7,
-    title: 'Generate CI/CD Pipeline',
-    details: 'Automatically creating a GitHub Actions workflow for continuous integration.',
+    id: 5,
+    title: 'Deploy to Production (Cloud Run)',
+    details: 'Deploying the application to Google Cloud Run.',
     status: DeploymentStatus.PENDING,
-    log: 'creating_.github/workflows/main.yml... on:push:branches:main... jobs:build,test,deploy... workflow file generated.'
-  },
-  {
-    id: 8,
-    title: 'Run Pipeline (Build, Test, Stage)',
-    details: 'Executing the CI/CD pipeline to ensure application integrity.',
-    status: DeploymentStatus.PENDING,
-    log: 'pipeline_triggered... build job OK... test job OK (128/128 passed)... staging deployment OK... all checks passed.'
-  },
-  {
-    id: 9,
-    title: 'Deploy to Production (GCP)',
-    details: 'Deploying the application to Google Cloud Platform.',
-    status: DeploymentStatus.PENDING,
-    log: 'authenticating_with_gcp... creating_cloud_run_service... routing_traffic... deployment to production successful.'
+    log: ''
   },
 ];
 

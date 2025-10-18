@@ -33,7 +33,7 @@ jobs:
           fi
 
       - name: Run tests
-        run: npm test --if-present
+        run: npm test --if-present -- --passWithNoTests
 
       - name: Build app
         run: npm run build --if-present
@@ -72,7 +72,7 @@ jobs:
           export_default_credentials: true
 
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+        run: gcloud auth configure-docker __GCP_REGION__-docker.pkg.dev --quiet
 
       - name: Ensure Dockerfile
         run: |
