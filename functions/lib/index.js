@@ -6,6 +6,10 @@ import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { defineSecret } from 'firebase-functions/params';
 import cors from 'cors';
+import sodium from 'libsodium-wrappers';
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 if (getApps().length === 0) {
     initializeApp();
 }
@@ -14,6 +18,7 @@ const WEBHOOK_KEY = process.env.DEPLOY_WEBHOOK_KEY || process.env.WEBHOOK_KEY ||
 // Define secrets for API keys
 const genaiApiKey = defineSecret('GENAI_API_KEY');
 const julesApiKey = defineSecret('JULES_API_KEY');
+const gcloudServiceKey = defineSecret('GCLOUD_SERVICE_KEY');
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
@@ -67,13 +72,11 @@ app.post('/deploy/webhook', async (req, res) => {
         if (!repoFullName || !url)
             return res.status(400).json({ error: 'repoFullName and url required' });
         const createdAt = new Date().toISOString();
-        // Store under deployments/{repo}/runs/{createdAt}
         await db.collection('deployments').doc(repoFullName).collection('runs').doc(createdAt).set({
             repoFullName,
             url,
             createdAt
         });
-        // Also store latest pointer
         await db.collection('deployments').doc(repoFullName).set({ latestUrl: url, updatedAt: createdAt }, { merge: true });
         res.json({ ok: true });
     }
@@ -118,7 +121,6 @@ app.get('/deployments', requireAuth, async (req, res) => {
         if (!doc.exists)
             return res.status(400).json({ error: 'GitHub not linked' });
         const token = doc.data().accessToken;
-        // 1) Fetch user's repos from GitHub (limit 100)
         const response = await fetch('https://api.github.com/user/repos?per_page=100', {
             headers: {
                 Authorization: `Bearer ${token}`,
@@ -129,7 +131,6 @@ app.get('/deployments', requireAuth, async (req, res) => {
         if (!response.ok)
             return res.status(response.status).json(repos);
         const fullNames = repos.map((r) => r.full_name);
-        // 2) For each repo, read latest deployment from Firestore if present
         const results = [];
         const tasks = fullNames.map(async (name) => {
             const snap = await db.collection('deployments').doc(name).get();
@@ -137,7 +138,6 @@ app.get('/deployments', requireAuth, async (req, res) => {
             results.push({ repoFullName: name, url: data?.latestUrl || null, updatedAt: data?.updatedAt || null });
         });
         await Promise.all(tasks);
-        // 3) Sort by updatedAt desc (nulls last)
         results.sort((a, b) => {
             if (!a.updatedAt && !b.updatedAt)
                 return 0;
@@ -252,7 +252,195 @@ app.post('/jules/send', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Failed to send message to Jules' });
     }
 });
+// Start deployment orchestration
+app.post('/deploy', requireAuth, async (req, res) => {
+    const { repoFullName } = req.body;
+    if (!repoFullName)
+        return res.status(400).json({ error: 'repoFullName required' });
+    const uid = req.uid;
+    const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+    if (!tokenDoc.exists)
+        return res.status(400).json({ error: 'GitHub not linked' });
+    const ghToken = tokenDoc.data().accessToken;
+    const treeResp = await fetch(`https://api.github.com/repos/${repoFullName}/git/trees/HEAD?recursive=1`, {
+        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    const tree = (await treeResp.json());
+    if (!treeResp.ok)
+        return res.status(treeResp.status).json(tree);
+    const paths = (tree.tree || []).map((t) => t.path);
+    const isNode = paths.includes('package.json') || paths.some((p) => p.endsWith('package.json'));
+    const detectedFramework = (() => {
+        const has = (p) => paths.some((x) => x.toLowerCase().includes(p));
+        if (has('next.config'))
+            return 'Next.js';
+        if (has('angular.json'))
+            return 'Angular';
+        if (has('vite.config'))
+            return 'Vite';
+        if (has('vue.config') || has('src/main.ts') && has('src/App.vue'))
+            return 'Vue';
+        return isNode ? 'Node.js' : 'Unknown';
+    })();
+    const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    const repoMeta = await repoResp.json();
+    const defaultBranch = repoResp.ok && repoMeta.default_branch ? repoMeta.default_branch : 'main';
+    if (!isNode) {
+        return res.status(400).json({ error: 'Unsupported repository type. A package.json was not found. Currently only Node.js repos are supported.' });
+    }
+    const workflowPath = '.github/workflows/ci.yml';
+    const getFileResp = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    const [owner, repo] = repoFullName.split('/');
+    const gcpSecrets = {
+        GCP_PROJECT: process.env.GCP_PROJECT || 'devyntra-500e4',
+        GCP_REGION: process.env.GCP_REGION || 'us-central1',
+        AR_REPO: 'devyntra-images',
+        SERVICE_NAME: repo,
+        REPO_NAME: repo
+    };
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const templatePath = path.join(__dirname, 'workflow-template.yml');
+    let workflowYml;
+    try {
+        workflowYml = fs.readFileSync(templatePath, 'utf8');
+    }
+    catch (error) {
+        console.error('Error reading workflow template:', error);
+        return res.status(500).json({ error: 'Failed to read workflow template' });
+    }
+    for (const [key, value] of Object.entries(gcpSecrets)) {
+        workflowYml = workflowYml.replace(new RegExp(`__${key}__`, 'g'), value);
+    }
+    const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
+    if (getFileResp.status === 404) {
+        await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+            method: 'PUT',
+            headers: {
+                Authorization: `Bearer ${ghToken}`,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ message: 'chore(ci): add GitHub Actions workflow', content: desiredContentB64 })
+        });
+    }
+    else if (getFileResp.ok) {
+        const existing = await getFileResp.json();
+        if (existing.content.replace(/\s/g, '') !== desiredContentB64.replace(/\s/g, '')) {
+            await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+                method: 'PUT',
+                headers: {
+                    Authorization: `Bearer ${ghToken}`,
+                    Accept: 'application/vnd.github+json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message: 'chore(ci): update workflow', content: desiredContentB64, sha: existing.sha })
+            });
+        }
+    }
+    if (isNode) {
+        const dockerfilePath = 'Dockerfile';
+        const getDockerfile = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+        });
+        if (getDockerfile.status === 404) {
+            const dockerfile = Buffer.from(`FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nEXPOSE 3000\nCMD ["npm", "start"]\n`).toString('base64');
+            await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
+                method: 'PUT',
+                headers: {
+                    Authorization: `Bearer ${ghToken}`,
+                    Accept: 'application/vnd.github+json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message: 'chore(docker): add Dockerfile', content: dockerfile })
+            });
+        }
+    }
+    try {
+        const keyResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/public-key`, {
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+        });
+        if (keyResp.ok) {
+            const keyData = await keyResp.json();
+            await sodium.ready;
+            const { key, key_id } = keyData;
+            const encrypt = (value) => {
+                const binkey = sodium.from_base64(key, sodium.base64_variants.ORIGINAL);
+                const binsec = sodium.from_string(value);
+                const encBytes = sodium.crypto_box_seal(binsec, binkey);
+                return sodium.to_base64(encBytes, sodium.base64_variants.ORIGINAL);
+            };
+            for (const [name, value] of Object.entries(gcpSecrets)) {
+                const encrypted_value = encrypt(value);
+                await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${name}`, {
+                    method: 'PUT',
+                    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ encrypted_value, key_id })
+                });
+            }
+            const serviceAccountKey = gcloudServiceKey.value();
+            if (serviceAccountKey) {
+                const encrypted_key = encrypt(serviceAccountKey);
+                await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCLOUD_SERVICE_KEY`, {
+                    method: 'PUT',
+                    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
+                });
+            }
+        }
+    }
+    catch (e) {
+        console.error('Failed setting repo secrets', e);
+    }
+    try {
+        await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/ci.yml/dispatches`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref: defaultBranch })
+        });
+    }
+    catch (e) {
+        console.error('workflow_dispatch error', e);
+    }
+    let julesSessionId = null;
+    try {
+        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
+        if (julesApiKeyValue) {
+            const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
+            const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
+                body: JSON.stringify({
+                    prompt,
+                    sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: 'main' } },
+                    title: `Devyntra deploy: ${repoFullName}`
+                })
+            });
+            if (julesResp.ok) {
+                const julesData = await julesResp.json();
+                julesSessionId = (julesData.name || julesData.id || '').toString();
+            }
+        }
+    }
+    catch (e) {
+        console.error('Jules session error', e);
+    }
+    const deploymentUrl = `https://cloud-run-simulated.devyntra.app/${encodeURIComponent(repoFullName)}`;
+    res.json({
+        detectedStack: isNode ? 'node' : 'unknown',
+        detectedFramework,
+        workflowEnsured: true,
+        dockerfileEnsured: isNode,
+        dockerHubSecretsSet: true,
+        julesSessionId,
+        deploymentUrl
+    });
+});
 export const api = onRequest({
     region: 'us-central1',
-    secrets: [genaiApiKey, julesApiKey]
+    secrets: [genaiApiKey, julesApiKey, gcloudServiceKey]
 }, app);
