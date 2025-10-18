@@ -455,6 +455,7 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const [lastStepAdvanceAt, setLastStepAdvanceAt] = useState<number>(0);
   const [lastJulesMessage, setLastJulesMessage] = useState<string>('');
   const [isJulesComplete, setIsJulesComplete] = useState<boolean>(false);
+  const [isPatchApplied, setIsPatchApplied] = useState<boolean>(false);
   const [isDeploymentTriggered, setIsDeploymentTriggered] = useState<boolean>(false);
 
   const pageTitles: Record<Page, string> = {
@@ -483,6 +484,7 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     setDeployedLink(null);
     setJulesSessionId(null);
     setIsJulesComplete(false);
+    setIsPatchApplied(false);
     setIsDeploymentTriggered(false);
   }, []);
   
@@ -616,19 +618,51 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
 
   // Apply patch and trigger deployment after Jules is complete
   useEffect(() => {
-    if (isJulesComplete && !isDeploymentTriggered) {
+    if (isJulesComplete && !isPatchApplied) {
       (async () => {
         try {
+          // Advance UI to "Applying Fixes" step
+          setDeploymentSteps(prev => {
+            const steps = [...prev];
+            steps[0].status = DeploymentStatus.COMPLETED;
+            steps[1].status = DeploymentStatus.RUNNING;
+            return steps;
+          });
+          setCurrentStepIndex(1);
+
           await applyPatch(selectedRepo, julesSessionId!);
-          await triggerDeployment(selectedRepo);
-          setIsDeploymentTriggered(true);
+          setIsPatchApplied(true);
         } catch (e) {
-          setDeployError('Failed to apply patch and trigger deployment after code analysis.');
+          setDeployError('Failed to apply AI code fixes.');
           setIsDeploying(false);
         }
       })();
     }
-  }, [isJulesComplete, isDeploymentTriggered, selectedRepo, julesSessionId]);
+  }, [isJulesComplete, isPatchApplied, selectedRepo, julesSessionId]);
+
+  // Trigger deployment after patch is applied
+  useEffect(() => {
+    if (isPatchApplied && !isDeploymentTriggered) {
+        (async () => {
+            try {
+                // Advance UI
+                setDeploymentSteps(prev => {
+                    const steps = [...prev];
+                    steps[1].status = DeploymentStatus.COMPLETED;
+                    steps[2].status = DeploymentStatus.RUNNING;
+                    return steps;
+                });
+                setCurrentStepIndex(2);
+
+                await triggerDeployment(selectedRepo);
+                setIsDeploymentTriggered(true);
+            } catch (e) {
+                setDeployError('Failed to trigger the deployment pipeline.');
+                setIsDeploying(false);
+            }
+        })();
+    }
+  }, [isPatchApplied, isDeploymentTriggered, selectedRepo]);
 
 
   // Real-time polling of GitHub Actions run status, only after deployment is triggered
@@ -641,30 +675,38 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     const updateStepsForStatus = (status: string, conclusion: string | null) => {
       setDeploymentSteps(prev => {
         const steps = [...prev];
-        // 0: Prepare, 1: Jules, 2: Build & Test, 3: Docker, 4: Deploy
+        const currentCIIndex = 2; // "Install Dependencies" is the first CI step
+
         if (status === 'queued') {
-          setCurrentStepIndex(2); // Start of build & test
+          setCurrentStepIndex(currentCIIndex);
         } else if (status === 'in_progress') {
           setSawInProgress(true);
           const now = Date.now();
-          if (now - lastStepAdvanceAt > 3000) {
+          // This logic now advances through the *CI-related* steps only
+          if (now - lastStepAdvanceAt > 5000) {
             setLastStepAdvanceAt(now);
             setCurrentStepIndex(idx => Math.min(idx + 1, steps.length - 1));
           }
         } else if (status === 'completed') {
           if (conclusion === 'success') {
-            setCurrentStepIndex(steps.length); // Finish all steps
+            // Mark all remaining steps as complete
+            for (let i = currentStepIndex; i < steps.length; i++) {
+                steps[i].status = DeploymentStatus.COMPLETED;
+            }
+            setCurrentStepIndex(steps.length);
           } else {
             const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
             if (runningIdx >= 0) steps[runningIdx].status = DeploymentStatus.FAILED;
           }
         }
-        // Update statuses based on index
+
+        // Update statuses based on index, respecting pre-CI steps
         steps.forEach((step, idx) => {
-          if (idx < currentStepIndex) step.status = DeploymentStatus.COMPLETED;
-          else if (idx === currentStepIndex) step.status = DeploymentStatus.RUNNING;
-          else step.status = DeploymentStatus.PENDING;
+            if (idx < currentStepIndex) step.status = DeploymentStatus.COMPLETED;
+            else if (idx === currentStepIndex) step.status = DeploymentStatus.RUNNING;
+            else step.status = DeploymentStatus.PENDING;
         });
+
         return steps;
       });
     };
