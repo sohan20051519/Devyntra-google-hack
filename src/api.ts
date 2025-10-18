@@ -1,8 +1,10 @@
 import { auth } from '../firebase';
 
 // Backend API base URL
-// Prefer build-time env (set via Vite: VITE_API_BASE_URL), fallback to last-known URL
-const baseUrl: string = (import.meta as any)?.env?.VITE_API_BASE_URL || 'https://api-mcwd6yzjia-uc.a.run.app';
+const baseUrl =
+  process.env.NODE_ENV === "development"
+    ? "http://localhost:5001/devyntra-500e4/us-central1/api"
+    : "https://api-mcwd6yzjia-uc.a.run.app";
 
 async function authHeader() {
   const user = auth.currentUser;
@@ -19,24 +21,6 @@ export async function linkGithub(accessToken: string) {
     body: JSON.stringify({ accessToken })
   });
   if (!res.ok) throw new Error('Failed to link GitHub');
-  return res.json();
-}
-
-export async function triggerDeployment(repoFullName: string): Promise<{ ok: boolean }>{
-  const headers = await authHeader();
-  const res = await fetch(`${baseUrl}/trigger-deployment`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ repoFullName })
-  });
-  if (!res.ok) {
-    try {
-      const data = await res.json();
-      throw new Error(data?.error || 'Failed to trigger deployment');
-    } catch {
-      throw new Error('Failed to trigger deployment');
-    }
-  }
   return res.json();
 }
 
@@ -122,20 +106,11 @@ export async function julesSend(sessionId: string, prompt: string): Promise<void
   }
 }
 
-export async function applyPatch(repoFullName: string, julesSessionId: string): Promise<{ ok: boolean }>{
+export async function exchangeCodeForToken(code: string): Promise<void> {
   const headers = await authHeader();
-  const res = await fetch(`${baseUrl}/apply-patch`, {
+  await fetch(`${baseUrl}/auth/github`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ repoFullName, julesSessionId })
+    body: JSON.stringify({ code }),
   });
-  if (!res.ok) {
-    try {
-      const data = await res.json();
-      throw new Error(data?.error || 'Failed to apply patch');
-    } catch {
-      throw new Error('Failed to apply patch');
-    }
-  }
-  return res.json();
 }

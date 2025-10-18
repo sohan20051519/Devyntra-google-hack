@@ -7,6 +7,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { defineSecret } from 'firebase-functions/params';
 import cors from 'cors';
 import sodium from 'libsodium-wrappers';
+import jwt from 'jsonwebtoken';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,6 +22,11 @@ const WEBHOOK_KEY = process.env.DEPLOY_WEBHOOK_KEY || process.env.WEBHOOK_KEY ||
 const genaiApiKey = defineSecret('GENAI_API_KEY');
 const julesApiKey = defineSecret('JULES_API_KEY');
 const gcloudServiceKey = defineSecret('GCLOUD_SERVICE_KEY');
+const githubAppPrivateKey = defineSecret('GITHUB_APP_PRIVATE_KEY');
+const githubAppClientSecret = defineSecret('GITHUB_APP_CLIENT_SECRET');
+
+const GITHUB_APP_ID = '2139669';
+const GITHUB_APP_CLIENT_ID = 'Iv23li892YlZShywCzP3';
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -91,13 +97,60 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
     .catch(() => res.status(401).json({ error: 'Invalid ID token' }));
 }
 
-// Store GitHub OAuth access token received from Firebase client sign-in
+async function getGitHubAppToken(): Promise<string> {
+    const privateKey = githubAppPrivateKey.value();
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+        iat: now - 60,
+        exp: now + (10 * 60),
+        iss: GITHUB_APP_ID,
+    };
+    const token = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+    return token;
+}
+
+async function getInstallationAccessToken(installationId: number): Promise<string> {
+    const appToken = await getGitHubAppToken();
+    const response = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${appToken}`,
+            Accept: 'application/vnd.github+json',
+        },
+    });
+    const data = await response.json() as { token: string };
+    if (!response.ok) {
+        throw new Error('Failed to get installation access token');
+    }
+    return data.token;
+}
+
+// Exchange a GitHub OAuth code for an access token and store it
 app.post('/auth/github', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const { accessToken } = req.body as { accessToken?: string };
-  if (!accessToken) return res.status(400).json({ error: 'Missing accessToken' });
-  const uid = req.uid as string;
-  await db.collection('githubTokens').doc(uid).set({ accessToken }, { merge: true });
-  res.json({ ok: true });
+    const { code } = req.body as { code?: string };
+    if (!code) return res.status(400).json({ error: 'Missing code' });
+    const uid = req.uid as string;
+
+    const response = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+        },
+        body: JSON.stringify({
+            client_id: GITHUB_APP_CLIENT_ID,
+            client_secret: githubAppClientSecret.value(),
+            code,
+        }),
+    });
+
+    const data = await response.json() as { access_token: string };
+    if (!response.ok || !data.access_token) {
+        return res.status(400).json({ error: 'Failed to exchange code for token' });
+    }
+
+    await db.collection('githubTokens').doc(uid).set({ accessToken: data.access_token }, { merge: true });
+    res.json({ ok: true });
 });
 
 // List repositories for the authenticated user (selected/all scopes handled by GitHub OAuth)
@@ -303,12 +356,25 @@ app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response
   const { repoFullName } = req.body as { repoFullName?: string };
   if (!repoFullName) return res.status(400).json({ error: 'repoFullName required' });
   const uid = req.uid as string;
-  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
-  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+  const [owner, repo] = repoFullName.split('/');
+
+  const appToken = await getGitHubAppToken();
+  const installationResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/installation`, {
+      headers: {
+          Authorization: `Bearer ${appToken}`,
+          Accept: 'application/vnd.github+json',
+      },
+  });
+  if (!installationResponse.ok) {
+      return res.status(400).json({ error: 'GitHub App not installed on this repository' });
+  }
+  const installation = await installationResponse.json() as { id: number };
+  const installationId = installation.id;
+
+  const ghToken = await getInstallationAccessToken(installationId);
 
   const treeResp = await fetch(`https://api.github.com/repos/${repoFullName}/git/trees/HEAD?recursive=1`, {
-    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
   });
   const tree = (await treeResp.json()) as GitTree;
   if (!treeResp.ok) return res.status(treeResp.status).json(tree);
@@ -338,7 +404,6 @@ app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response
     headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
   });
 
-  const [owner, repo] = repoFullName.split('/');
   const gcpSecrets = {
     GCP_PROJECT: process.env.GCP_PROJECT || 'devyntra-500e4',
     GCP_REGION: process.env.GCP_REGION || 'us-central1',
@@ -638,5 +703,5 @@ app.post('/apply-patch', requireAuth, async (req: AuthenticatedRequest, res: Res
 
 export const api = onRequest({
   region: 'us-central1',
-  secrets: [genaiApiKey, julesApiKey, gcloudServiceKey]
+  secrets: [genaiApiKey, julesApiKey, gcloudServiceKey, githubAppPrivateKey, githubAppClientSecret]
 }, app);

@@ -29,9 +29,11 @@
     "axios": "^1.7.0",
     "helmet": "^8.0.0",
     "compression": "^1.7.4",
-    "morgan": "^1.10.0"
+    "morgan": "^1.10.0",
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.6",
     "@types/libsodium-wrappers": "^0.7.14",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",

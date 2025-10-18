@@ -19,11 +19,13 @@ githubProvider.addScope('repo');
 githubProvider.addScope('workflow');
 githubProvider.setCustomParameters({ allow_signup: 'true' });
 
-export async function signInWithGitHub(): Promise<{ user: User; githubAccessToken?: string | null }> {
-  const result = await signInWithPopup(auth, githubProvider);
-  const credential = GithubAuthProvider.credentialFromResult(result);
-  const token = credential?.accessToken ?? null;
-  return { user: result.user, githubAccessToken: token };
+export async function signInWithGitHub() {
+  const GITHUB_APP_CLIENT_ID = 'Iv23li892YlZShywCzP3';
+  const redirect_uri = `https://devyntra-500e4.web.app/auth/callback`;
+  const url = `https://github.com/login/oauth/authorize?client_id=${GITHUB_APP_CLIENT_ID}&redirect_uri=${encodeURIComponent(
+    redirect_uri
+  )}&scope=repo,workflow`;
+  window.location.href = url;
 }
 
 export function observeAuthState(callback: (user: User | null) => void) {
