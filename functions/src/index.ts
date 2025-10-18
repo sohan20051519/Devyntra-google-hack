@@ -449,15 +449,6 @@ app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response
     console.error('Failed setting repo secrets', e);
   }
 
-  try {
-    await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/ci.yml/dispatches`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ref: defaultBranch })
-    });
-  } catch (e) {
-    console.error('workflow_dispatch error', e);
-  }
 
   let julesSessionId: string | null = null;
   try {
@@ -505,6 +496,33 @@ Keep your changes as minimal as possible, but ensure they are sufficient to get 
     julesSessionId,
     deploymentUrl
   });
+});
+
+app.post('/trigger-deployment', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const { repoFullName } = req.body as { repoFullName?: string };
+  if (!repoFullName) return res.status(400).json({ error: 'repoFullName required' });
+  const uid = req.uid as string;
+  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+  const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+
+  const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+  });
+  const repoMeta = await repoResp.json() as RepoMetadata;
+  const defaultBranch = repoResp.ok && repoMeta.default_branch ? repoMeta.default_branch : 'main';
+
+  try {
+    await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/ci.yml/dispatches`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: defaultBranch })
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('workflow_dispatch error', e);
+    res.status(500).json({ error: 'Failed to trigger deployment' });
+  }
 });
 
 export const api = onRequest({

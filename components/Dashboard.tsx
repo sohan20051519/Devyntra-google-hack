@@ -3,7 +3,7 @@ import DeploymentView from './DeploymentView';
 import { MOCK_DEPLOYMENT_HISTORY, MOCK_LOGS, INITIAL_DEPLOYMENT_STEPS } from '../constants';
 import { DeploymentHistoryEntry, LogEntry, DeploymentStep, DeploymentStatus } from '../types';
 import { GoogleGenAI } from "@google/genai";
-import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend } from '../src/api';
+import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment } from '../src/api';
 import { auth, observeAuthState, signInWithGitHub } from '../firebase';
 import { updateProfile } from 'firebase/auth';
 import { linkGithub } from '../src/api';
@@ -454,6 +454,8 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const MIN_ANIMATION_MS = 15000;
   const [lastStepAdvanceAt, setLastStepAdvanceAt] = useState<number>(0);
   const [lastJulesMessage, setLastJulesMessage] = useState<string>('');
+  const [isJulesComplete, setIsJulesComplete] = useState<boolean>(false);
+  const [isDeploymentTriggered, setIsDeploymentTriggered] = useState<boolean>(false);
 
   const pageTitles: Record<Page, string> = {
       new_deployment: 'New Deployment',
@@ -479,6 +481,9 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     setDeploymentSteps(JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS)));
     setCurrentStepIndex(-1);
     setDeployedLink(null);
+    setJulesSessionId(null);
+    setIsJulesComplete(false);
+    setIsDeploymentTriggered(false);
   }, []);
   
   const handleNewDeployment = () => {
@@ -570,56 +575,95 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
       setActivePage('logs');
   }, []);
 
-  // Real-time polling of GitHub Actions run status
+  // Poll Jules activities for live logs and completion
   useEffect(() => {
-    if (!isDeploying || !selectedRepo) return;
+    if (!isDeploying || !julesSessionId || isJulesComplete) return;
+
+    let isCancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const data = await getJulesStatus(julesSessionId);
+        if (isCancelled) return;
+
+        const activities = (data.activities?.activities || []) as any[];
+        if (activities.length) {
+          const latest = (activities[0]?.summary || activities[0]?.title || activities[0]?.state) as string | undefined;
+          if (latest) {
+            setLastJulesMessage(latest);
+            setDeploymentSteps(prev => {
+              const steps = [...prev];
+              const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
+              if (runningIdx >= 0) steps[runningIdx].log = latest;
+              return steps;
+            });
+          }
+        }
+
+        if (data.session?.state === 'COMPLETED' || data.session?.state === 'FAILED') {
+          setIsJulesComplete(true);
+          clearInterval(interval);
+        }
+      } catch (e) {
+        console.error('Jules polling error', e);
+      }
+    }, 4000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, [isDeploying, julesSessionId, isJulesComplete]);
+
+  // Trigger deployment after Jules is complete
+  useEffect(() => {
+    if (isJulesComplete && !isDeploymentTriggered) {
+      (async () => {
+        try {
+          await triggerDeployment(selectedRepo);
+          setIsDeploymentTriggered(true);
+        } catch (e) {
+          setDeployError('Failed to trigger deployment after code analysis.');
+          setIsDeploying(false);
+        }
+      })();
+    }
+  }, [isJulesComplete, isDeploymentTriggered, selectedRepo]);
+
+
+  // Real-time polling of GitHub Actions run status, only after deployment is triggered
+  useEffect(() => {
+    if (!isDeploying || !selectedRepo || !isDeploymentTriggered) return;
+
     let isCancelled = false;
     let interval: any;
 
     const updateStepsForStatus = (status: string, conclusion: string | null) => {
       setDeploymentSteps(prev => {
         const steps = [...prev];
-        // Basic mapping for visual feedback
-        // 0: Prepare project, 1: Generate CI, 2: Build & Test, 3: Docker Build & Push, 4: Deploy
+        // 0: Prepare, 1: Jules, 2: Build & Test, 3: Docker, 4: Deploy
         if (status === 'queued') {
-          steps.forEach((s, idx) => { s.status = idx === 0 ? DeploymentStatus.RUNNING : (s.status === DeploymentStatus.COMPLETED ? DeploymentStatus.COMPLETED : DeploymentStatus.PENDING); });
-          setCurrentStepIndex(0);
+          setCurrentStepIndex(2); // Start of build & test
         } else if (status === 'in_progress') {
           setSawInProgress(true);
           const now = Date.now();
-          const canAdvance = now - (lastStepAdvanceAt || 0) > 3000; // advance every 3s
-          if (canAdvance) {
+          if (now - lastStepAdvanceAt > 3000) {
             setLastStepAdvanceAt(now);
-            setCurrentStepIndex(idx => {
-              const nextIdx = Math.min(idx + 1, steps.length - 1);
-              // complete previous
-              if (idx >= 0 && idx < steps.length) steps[idx].status = DeploymentStatus.COMPLETED;
-              // set running next
-              if (nextIdx < steps.length) steps[nextIdx].status = DeploymentStatus.RUNNING;
-              // attach latest live message to running step
-              if (nextIdx < steps.length && lastJulesMessage) {
-                steps[nextIdx].log = lastJulesMessage;
-              }
-              return nextIdx;
-            });
+            setCurrentStepIndex(idx => Math.min(idx + 1, steps.length - 1));
           }
         } else if (status === 'completed') {
           if (conclusion === 'success') {
-            // complete the current running step
-            const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
-            if (runningIdx >= 0) steps[runningIdx].status = DeploymentStatus.COMPLETED;
-            // enrich final step with run URL if available
-            const deployIdx = steps.findIndex(s => s.title.toLowerCase().includes('deploy to production'));
-            if (deployIdx >= 0 && workflowUrl) {
-              steps[deployIdx].details = 'Workflow completed successfully.';
-              steps[deployIdx].log = `actions_run_url: ${workflowUrl}`;
-            }
+            setCurrentStepIndex(steps.length); // Finish all steps
           } else {
-            // Mark the current running step as failed
-            const idx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING) >= 0 ? steps.findIndex(s => s.status === DeploymentStatus.RUNNING) : steps.length - 1;
-            if (idx >= 0) steps[idx].status = DeploymentStatus.FAILED;
+            const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
+            if (runningIdx >= 0) steps[runningIdx].status = DeploymentStatus.FAILED;
           }
         }
+        // Update statuses based on index
+        steps.forEach((step, idx) => {
+          if (idx < currentStepIndex) step.status = DeploymentStatus.COMPLETED;
+          else if (idx === currentStepIndex) step.status = DeploymentStatus.RUNNING;
+          else step.status = DeploymentStatus.PENDING;
+        });
         return steps;
       });
     };
@@ -628,100 +672,33 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
       try {
         const res = await getDeployStatus(selectedRepo);
         if (isCancelled) return;
-        setWorkflowStatus(res.status);
-        setWorkflowConclusion(res.conclusion);
-        setWorkflowUrl(res.html_url);
         updateStepsForStatus(res.status, res.conclusion);
 
-          if (res.status === 'completed') {
+        if (res.status === 'completed') {
           if (res.conclusion === 'success') {
-            const deploymentUrlToUse = pendingDeploymentUrl || undefined;
-            // Only show link if we actually saw progress or at least 10s elapsed
-            const elapsed = Date.now() - (deployStartedAt || Date.now());
-            const canReveal = sawInProgress || elapsed > 10000;
-            if (deploymentUrlToUse && canReveal) setDeployedLink(deploymentUrlToUse);
-            const newDeploymentEntry: DeploymentHistoryEntry = {
-              id: `dep_${Date.now()}`,
-              repoName: selectedRepo,
-              status: 'Success',
-              deployedAt: new Date().toLocaleString(),
-              commitHash: (Math.random() + 1).toString(36).substring(7),
-              url: deploymentUrlToUse || undefined
-            } as any;
-            const now = new Date();
-            const newLogEntries: LogEntry[] = [
-              { id: `log_${Date.now()}_start`, deploymentId: newDeploymentEntry.id, timestamp: now.toISOString().replace('T',' ').substring(0,19), level: 'INFO', message: `Workflow completed successfully.` },
-            ];
-            handleDeploymentComplete(newDeploymentEntry, newLogEntries);
+            setDeployedLink(pendingDeploymentUrl);
           } else {
-            const linkText = workflowUrl ? 'View workflow run' : '';
-            setDeployError(`GitHub workflow failed. ${linkText}`.trim());
-              // Ask Jules to fix and push, then the user can click Deploy again
-              if (julesSessionId) {
-                try {
-                  await julesSend(julesSessionId, 'CI failed. Please fix the issues, commit, and push to the default branch, then reply DONE.');
-                } catch {}
-              }
+            setDeployError(`GitHub workflow failed. ${workflowUrl ? 'View workflow run' : ''}`.trim());
           }
-          // Enforce minimum animation duration
-          const elapsed = Date.now() - (deployStartedAt || Date.now());
-          const canFinish = sawInProgress || elapsed >= MIN_ANIMATION_MS;
-          if (canFinish) {
-            setIsDeploying(false);
-          }
+          setIsDeploying(false);
           clearInterval(interval);
         }
       } catch (e) {
-        if (!isCancelled) {
-          console.error('Status polling error', e);
-        }
+        if (!isCancelled) console.error('Status polling error', e);
       }
     };
 
-    // Kickoff immediately, then poll
-    poll();
-    interval = setInterval(poll, 5000);
+    const initialPollTimeout = setTimeout(() => {
+      poll();
+      interval = setInterval(poll, 5000);
+    }, 2000); // Wait 2s before first poll
 
-    return () => { isCancelled = true; if (interval) clearInterval(interval); };
-  }, [isDeploying, selectedRepo, pendingDeploymentUrl]);
-
-  // Poll Jules activities for live logs
-  useEffect(() => {
-    if (!isDeploying || !julesSessionId) return;
-    let isCancelled = false;
-    let interval: any;
-    const pollJules = async () => {
-      try {
-        const data = await getJulesStatus(julesSessionId);
-        if (isCancelled) return;
-        const activities = (data.activities?.activities || []) as any[];
-        if (activities.length) {
-          const now = new Date();
-          const newLogs: LogEntry[] = activities.slice(0, 5).map((a, idx) => ({
-            id: `jules_${Date.now()}_${idx}`,
-            deploymentId: `dep_${selectedRepo}`,
-            timestamp: new Date(now.getTime() - idx * 1000).toISOString().replace('T',' ').substring(0,19),
-            level: 'INFO',
-            message: (a?.summary || a?.title || a?.state || 'Activity update') as string
-          }));
-          setLogs(prev => [...newLogs, ...prev]);
-          // update currently running step's log with latest activity summary
-          const latest = (activities[0]?.summary || activities[0]?.title || activities[0]?.state) as string | undefined;
-          if (latest) setLastJulesMessage(latest);
-          setDeploymentSteps(prev => {
-            const steps = [...prev];
-            const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
-            if (runningIdx >= 0 && latest) steps[runningIdx].log = latest;
-            return steps;
-          });
-        }
-      } catch {}
+    return () => {
+      isCancelled = true;
+      clearTimeout(initialPollTimeout);
+      if (interval) clearInterval(interval);
     };
-    pollJules();
-    interval = setInterval(pollJules, 4000);
-    return () => { isCancelled = true; if (interval) clearInterval(interval); };
-  }, [isDeploying, julesSessionId, selectedRepo]);
-
+  }, [isDeploying, selectedRepo, isDeploymentTriggered, pendingDeploymentUrl, lastStepAdvanceAt]);
 
   const renderContent = () => {
       switch (activePage) {
