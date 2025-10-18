@@ -122,3 +122,20 @@ export async function julesSend(sessionId: string, prompt: string): Promise<void
   }
 }
 
+export async function applyPatch(repoFullName: string, julesSessionId: string): Promise<{ ok: boolean }>{
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/apply-patch`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ repoFullName, julesSessionId })
+  });
+  if (!res.ok) {
+    try {
+      const data = await res.json();
+      throw new Error(data?.error || 'Failed to apply patch');
+    } catch {
+      throw new Error('Failed to apply patch');
+    }
+  }
+  return res.json();
+}
