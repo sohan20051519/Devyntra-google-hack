@@ -384,12 +384,19 @@ app.post('/deploy', requireAuth, async (req, res) => {
             }
             const serviceAccountKey = gcloudServiceKey.value();
             if (serviceAccountKey) {
-                const encrypted_key = encrypt(serviceAccountKey);
-                await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCLOUD_SERVICE_KEY`, {
-                    method: 'PUT',
-                    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
-                });
+                try {
+                    const minifiedKey = JSON.stringify(JSON.parse(serviceAccountKey));
+                    const encrypted_key = encrypt(minifiedKey);
+                    await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCLOUD_SERVICE_KEY`, {
+                        method: 'PUT',
+                        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
+                    });
+                }
+                catch (e) {
+                    console.error('Invalid service account key JSON:', e);
+                    // Optionally, you could return an error response to the user here
+                }
             }
         }
     }
@@ -410,7 +417,19 @@ app.post('/deploy', requireAuth, async (req, res) => {
     try {
         const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
         if (julesApiKeyValue) {
-            const prompt = `You are a CI fixer agent. Task: Clone the repo, install deps, run build/test, fix issues, commit with clear messages, and push fixes directly to the default branch (${defaultBranch}). If scripts are missing, add minimal ones. Keep changes minimal but sufficient to pass CI.`;
+            const prompt = `You are a CI fixer agent. Your primary goal is to ensure the repository can be successfully deployed.
+
+**Your tasks are:**
+1.  Clone the repository.
+2.  Install all necessary dependencies.
+3.  Run the build and test scripts.
+4.  Identify and fix any errors that prevent the application from building or running.
+5.  If essential files like \`package.json\` are missing, create them with the necessary content.
+6.  If build or test scripts are missing from \`package.json\`, add minimal, functional scripts.
+7.  Commit all your changes with clear, descriptive messages.
+8.  Push all fixes directly to the default branch (\`${defaultBranch}\`).
+
+Keep your changes as minimal as possible, but ensure they are sufficient to get the CI pipeline to pass.`;
             const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
