@@ -22,6 +22,24 @@ export async function linkGithub(accessToken: string) {
   return res.json();
 }
 
+export async function triggerDeployment(repoFullName: string): Promise<{ ok: boolean }>{
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/trigger-deployment`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ repoFullName })
+  });
+  if (!res.ok) {
+    try {
+      const data = await res.json();
+      throw new Error(data?.error || 'Failed to trigger deployment');
+    } catch {
+      throw new Error('Failed to trigger deployment');
+    }
+  }
+  return res.json();
+}
+
 export async function fetchRepos(): Promise<{ id: string; name: string }[]> {
   const headers = await authHeader();
   const res = await fetch(`${baseUrl}/repos`, { headers });
