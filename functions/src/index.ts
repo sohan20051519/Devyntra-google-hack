@@ -437,7 +437,7 @@ app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response
         try {
           const minifiedKey = JSON.stringify(JSON.parse(serviceAccountKey));
           const encrypted_key = encrypt(minifiedKey);
-          await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCLOUD_SERVICE_KEY`, {
+          await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCP_CREDENTIALS`, {
             method: 'PUT',
             headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
             body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
