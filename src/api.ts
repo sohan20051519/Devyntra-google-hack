@@ -106,6 +106,23 @@ export async function julesSend(sessionId: string, prompt: string): Promise<void
   }
 }
 
+export async function triggerDeployment(repoFullName: string): Promise<void> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/trigger-deployment`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ repoFullName }),
+  });
+  if (!res.ok) {
+    try {
+      const data = await res.json();
+      throw new Error(data?.error || 'Failed to trigger deployment');
+    } catch {
+      throw new Error('Failed to trigger deployment');
+    }
+  }
+}
+
 export async function exchangeCodeForToken(code: string): Promise<void> {
   const headers = await authHeader();
   await fetch(`${baseUrl}/auth/github`, {
@@ -113,4 +130,21 @@ export async function exchangeCodeForToken(code: string): Promise<void> {
     headers,
     body: JSON.stringify({ code }),
   });
+}
+
+export async function applyPatch(repoFullName: string, julesSessionId: string): Promise<void> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/apply-patch`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ repoFullName, julesSessionId }),
+  });
+  if (!res.ok) {
+    try {
+      const data = await res.json();
+      throw new Error(data?.error || 'Failed to apply patch');
+    } catch {
+      throw new Error('Failed to apply patch');
+    }
+  }
 }
