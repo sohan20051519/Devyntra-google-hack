@@ -3,7 +3,7 @@ import DeploymentView from './DeploymentView';
 import { MOCK_DEPLOYMENT_HISTORY, MOCK_LOGS, INITIAL_DEPLOYMENT_STEPS } from '../constants';
 import { DeploymentHistoryEntry, LogEntry, DeploymentStep, DeploymentStatus } from '../types';
 import { GoogleGenAI } from "@google/genai";
-import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment } from '../src/api';
+import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch } from '../src/api';
 import { auth, observeAuthState, signInWithGitHub } from '../firebase';
 import { updateProfile } from 'firebase/auth';
 import { linkGithub } from '../src/api';
@@ -614,20 +614,21 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     };
   }, [isDeploying, julesSessionId, isJulesComplete]);
 
-  // Trigger deployment after Jules is complete
+  // Apply patch and trigger deployment after Jules is complete
   useEffect(() => {
     if (isJulesComplete && !isDeploymentTriggered) {
       (async () => {
         try {
+          await applyPatch(selectedRepo, julesSessionId!);
           await triggerDeployment(selectedRepo);
           setIsDeploymentTriggered(true);
         } catch (e) {
-          setDeployError('Failed to trigger deployment after code analysis.');
+          setDeployError('Failed to apply patch and trigger deployment after code analysis.');
           setIsDeploying(false);
         }
       })();
     }
-  }, [isJulesComplete, isDeploymentTriggered, selectedRepo]);
+  }, [isJulesComplete, isDeploymentTriggered, selectedRepo, julesSessionId]);
 
 
   // Real-time polling of GitHub Actions run status, only after deployment is triggered

@@ -72,6 +72,9 @@ interface GitHubFile {
 interface JulesSession {
   name?: string;
   id?: string;
+  result?: {
+    summary: string;
+  }
 }
 
 
@@ -463,8 +466,16 @@ app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response
 4.  Identify and fix any errors that prevent the application from building or running.
 5.  If essential files like \`package.json\` are missing, create them with the necessary content.
 6.  If build or test scripts are missing from \`package.json\`, add minimal, functional scripts.
-7.  Commit all your changes with clear, descriptive messages.
-8.  Push all fixes directly to the default branch (\`${defaultBranch}\`).
+7.  When you are finished, do not push the changes. Instead, output a list of all the files you have changed, in the following format:
+
+\`\`\`json
+[
+  {
+    "path": "path/to/file.ext",
+    "content": "The full content of the file goes here."
+  }
+]
+\`\`\`
 
 Keep your changes as minimal as possible, but ensure they are sufficient to get the CI pipeline to pass.`;
       const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
@@ -522,6 +533,106 @@ app.post('/trigger-deployment', requireAuth, async (req: AuthenticatedRequest, r
   } catch (e) {
     console.error('workflow_dispatch error', e);
     res.status(500).json({ error: 'Failed to trigger deployment' });
+  }
+});
+
+app.post('/apply-patch', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const { repoFullName, julesSessionId } = req.body as { repoFullName?: string, julesSessionId?: string };
+  if (!repoFullName || !julesSessionId) return res.status(400).json({ error: 'repoFullName and julesSessionId required' });
+  const uid = req.uid as string;
+  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+  const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+
+  const newBranchName = `jules-patch-${Date.now()}`;
+
+  try {
+    const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
+    if (!julesApiKeyValue) return res.status(500).json({ error: 'Jules not configured' });
+
+    const sessionResp = await fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(julesSessionId)}`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } });
+    const session = await sessionResp.json() as JulesSession;
+
+    const summary = session.result?.summary;
+    if (!summary) return res.status(500).json({ error: 'Jules session has no result' });
+
+    const changedFiles = JSON.parse(summary) as { path: string, content: string }[];
+    if (!changedFiles || !Array.isArray(changedFiles)) return res.status(500).json({ error: 'Invalid patch format from Jules' });
+
+    const [owner, repo] = repoFullName.split('/');
+
+    const repoInfo = await fetch(`https://api.github.com/repos/${repoFullName}`);
+    const repoData = await repoInfo.json() as RepoMetadata;
+    const mainBranch = repoData.default_branch || 'main';
+
+    const branchInfo = await fetch(`https://api.github.com/repos/${repoFullName}/branches/${mainBranch}`);
+    const branchData = await branchInfo.json() as { commit: { sha: string } };
+    const latestCommitSha = branchData.commit.sha;
+
+    await fetch(`https://api.github.com/repos/${repoFullName}/git/refs`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ref: `refs/heads/${newBranchName}`,
+        sha: latestCommitSha,
+      }),
+    });
+
+    for (const file of changedFiles) {
+        await fetch(`https://api.github.com/repos/${repoFullName}/contents/${file.path}`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: `Jules AI fix for ${file.path}`,
+                content: Buffer.from(file.content).toString('base64'),
+                branch: newBranchName,
+            }),
+        });
+    }
+
+    const prResponse = await fetch(`https://api.github.com/repos/${repoFullName}/pulls`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Jules AI Fixes',
+        head: newBranchName,
+        base: mainBranch,
+        body: 'This PR contains automated fixes from the Jules AI agent.',
+      }),
+    });
+    const prData = await prResponse.json() as { number: number, message?: string };
+    if (prData.message) {
+      // If there are no changes, GitHub will return an error
+      if (prData.message.includes('No commits between')) {
+        res.json({ ok: true, message: 'No changes to apply' });
+        return;
+      }
+      throw new Error(prData.message);
+    }
+
+    const mergeResponse = await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prData.number}/merge`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+    });
+
+    if (!mergeResponse.ok) {
+        const mergeData = await mergeResponse.json() as { message: string };
+        if (mergeData.message.includes('merge conflict')) {
+            throw new Error('Merge conflict when applying Jules patch');
+        }
+        throw new Error(mergeData.message);
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Failed to apply patch', e);
+    res.status(500).json({ error: 'Failed to apply patch' });
+  } finally {
+    // Clean up the temporary branch
+    await fetch(`https://api.github.com/repos/${repoFullName}/git/refs/heads/${newBranchName}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${ghToken}` },
+    });
   }
 });
 
