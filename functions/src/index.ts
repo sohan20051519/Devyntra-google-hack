@@ -61,6 +61,7 @@ interface RepoMetadata {
 }
 
 interface WorkflowRun {
+  id: number;
   status: string;
   conclusion: string | null;
   html_url: string;
@@ -396,7 +397,7 @@ app.get('/github/workflow-status', requireAuth, async (req: AuthenticatedRequest
         const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}`, {
             headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
         });
-        const data = await resp.json();
+        const data: any = await resp.json();
         if (!resp.ok) return res.status(resp.status).json(data);
         res.json({ status: data.status, conclusion: data.conclusion });
     } catch (e) {
@@ -424,7 +425,7 @@ app.get('/github/workflow-logs', requireAuth, async (req: AuthenticatedRequest, 
             const runResp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}`, {
                 headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
             });
-            const runData = await runResp.json();
+            const runData: any = await runResp.json();
             return res.status(200).json({ logs: `Could not retrieve logs. View them on GitHub: ${runData.html_url}` });
         }
         const logs = await resp.text();
@@ -620,7 +621,7 @@ Keep your changes as minimal as possible, but ensure they are sufficient to get 
         });
 
         if (!julesResp.ok) {
-            const errorData = await julesResp.json();
+            const errorData: any = await julesResp.json();
             throw new Error(errorData.error?.message || 'Failed to start Jules session');
         }
 
