@@ -263,9 +263,57 @@ app.get('/deployments', requireAuth, async (req: AuthenticatedRequest, res: Resp
 });
 
 // GitHub user profile
+app.get('/github/setup', async (req: Request, res: Response) => {
+    const { installation_id, state } = req.query;
+    const uid = state as string | undefined;
+
+    if (installation_id && uid) {
+        try {
+            await db.collection('userProfiles').doc(uid).set({
+                githubInstallationId: installation_id,
+            }, { merge: true });
+
+            return res.send(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Installation Successful</title>
+                    <style>
+                        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
+                        .container { text-align: center; background-color: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                        h1 { color: #2dce89; }
+                        p { color: #525f7f; }
+                        a { color: #5e72e4; text-decoration: none; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>Success!</h1>
+                        <p>The GitHub App was installed successfully.</p>
+                        <p>You can now close this window and return to the application.</p>
+                    </div>
+                </body>
+                </html>
+            `);
+        } catch (error) {
+            console.error('Failed to save installation ID', error);
+            return res.status(500).send('Failed to save installation ID.');
+        }
+    }
+    // Redirect to app homepage with an error if params are missing
+    return res.redirect('/?error=installation_failed');
+});
+
 app.get('/github/installation-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const uid = req.uid as string;
   try {
+    // 1. Check for a saved installation ID first.
+    const userProfileDoc = await db.collection('userProfiles').doc(uid).get();
+    if (userProfileDoc.exists && userProfileDoc.data()?.githubInstallationId) {
+        return res.json({ isInstalled: true });
+    }
+
+    // 2. Fallback to the old method (checking via GitHub API)
     const doc = await db.collection('githubTokens').doc(uid).get();
     if (!doc.exists) {
       return res.json({ isInstalled: false });
@@ -284,10 +332,18 @@ app.get('/github/installation-status', requireAuth, async (req: AuthenticatedReq
       return res.json({ isInstalled: false });
     }
 
-    const data = await response.json() as { installations: { app_id: number }[] };
-    const isInstalled = data.installations.some(inst => inst.app_id === parseInt(GITHUB_APP_ID, 10));
+    const data = await response.json() as { installations: { app_id: number, id: number }[] };
+    const installation = data.installations.find(inst => inst.app_id === parseInt(GITHUB_APP_ID, 10));
 
-    res.json({ isInstalled });
+    if (installation) {
+        // If found, save the installation ID for future checks
+        await db.collection('userProfiles').doc(uid).set({
+            githubInstallationId: installation.id,
+        }, { merge: true });
+        return res.json({ isInstalled: true });
+    }
+
+    res.json({ isInstalled: false });
 
   } catch (e) {
     console.error('Failed to get installation status', e);
