@@ -501,64 +501,19 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     return () => unsub();
   }, []);
 
-  const [isGhAppInstalled, setIsGhAppInstalled] = useState(false);
-
-  const checkInstallationAndRepos = useCallback(async () => {
-    console.log('Checking installation status...');
-    if (!auth.currentUser) return false;
-    try {
-      // Use a new API endpoint that combines both checks
-      const response = await getInstallationAndRepos();
-
-      if (response.installed) {
-        console.log('App is installed.');
-        setIsGhAppInstalled(true);
-        setRepos(response.repos || []);
-        setNeedsGithubAuth(false);
-        return true;
-      } else {
-        console.log('App is not installed.');
-        setIsGhAppInstalled(false);
-        setRepos([]);
-        return false;
-      }
-    } catch (error) {
-      console.error('Error checking GitHub App installation status:', error);
-      setIsGhAppInstalled(false);
-      setRepos([]);
-      // If the check fails, it could be due to auth, so we prompt to re-auth
-      setNeedsGithubAuth(true);
-      return false;
-    }
-  }, []);
-
   useEffect(() => {
-    let intervalId: NodeJS.Timeout | null = null;
-
-    const startPolling = () => {
-      checkInstallationAndRepos().then(installed => {
-        if (!installed) {
-          intervalId = setInterval(async () => {
-            console.log('Polling for installation status...');
-            const isInstalled = await checkInstallationAndRepos();
-            if (isInstalled && intervalId) {
-              console.log('Installation confirmed, stopping poll.');
-              clearInterval(intervalId);
-            }
-          }, 3000); // Poll every 3 seconds
-        }
-      });
-    };
-
-    startPolling();
-
-    return () => {
-      if (intervalId) {
-        console.log('Clearing interval on unmount.');
-        clearInterval(intervalId);
+    (async () => {
+      if (!auth.currentUser) return;
+      try {
+        const list = await fetchRepos();
+        setRepos(list);
+        setNeedsGithubAuth(false);
+      } catch (e) {
+        console.error('Failed to fetch repos', e);
+        setNeedsGithubAuth(true);
       }
-    };
-  }, [checkInstallationAndRepos]);
+    })();
+  }, []);
 
   const handleDeploy = async () => {
     if (!selectedRepo || isDeploying) return;
@@ -802,7 +757,6 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
             repos={repos}
             error={deployError}
             needsGithubAuth={needsGithubAuth}
-            isGhAppInstalled={isGhAppInstalled}
             onAuthorizeGithub={async () => {
               try {
                 const { githubAccessToken } = await signInWithGitHub();
@@ -872,7 +826,35 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
             userPhoto={userPhoto}
         />
         <main className="flex-1 overflow-y-auto p-4 md:p-8">
-          {renderContent()}
+          {activePage === 'new_deployment' && (
+            <DeploymentView
+              selectedRepo={selectedRepo}
+              onRepoSelect={setSelectedRepo}
+              isDeploying={isDeploying}
+              deploymentSteps={deploymentSteps}
+              currentStepIndex={currentStepIndex}
+              deployedLink={deployedLink}
+              onDeploy={handleDeploy}
+              onNewDeployment={handleNewDeployment}
+              repos={repos}
+              error={deployError}
+              needsGithubAuth={needsGithubAuth}
+              onAuthorizeGithub={async () => {
+                try {
+                  const { githubAccessToken } = await signInWithGitHub();
+                  if (githubAccessToken) {
+                    await linkGithub(githubAccessToken);
+                    const list = await fetchRepos();
+                    setRepos(list);
+                    setNeedsGithubAuth(false);
+                  }
+                } catch (e) {
+                  setNeedsGithubAuth(true);
+                }
+              }}
+            />
+          )}
+          {activePage !== 'new_deployment' && renderContent()}
         </main>
       </div>
     </div>
