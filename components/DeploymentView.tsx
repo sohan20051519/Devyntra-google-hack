@@ -46,6 +46,7 @@ interface DeploymentViewProps {
     repos?: { id: string; name: string }[];
     error?: string;
     needsGithubAuth?: boolean;
+    isGhAppInstalled?: boolean;
     onAuthorizeGithub?: () => Promise<void> | void;
 }
 
@@ -61,6 +62,7 @@ const DeploymentView: React.FC<DeploymentViewProps> = ({
   repos,
   error,
   needsGithubAuth,
+  isGhAppInstalled,
   onAuthorizeGithub
  }) => {
   
@@ -100,6 +102,15 @@ const DeploymentView: React.FC<DeploymentViewProps> = ({
                     <p className="mt-1 text-slate-600">We need permission to list your repositories for deployment.</p>
                     <button onClick={() => onAuthorizeGithub && onAuthorizeGithub()} className="mt-4 bg-blue-600 text-white font-medium py-2 px-6 rounded-full hover:bg-blue-700">Authorize GitHub</button>
                   </div>
+                ) : !isGhAppInstalled ? (
+                    <div className="text-center p-6">
+                        <span className="material-symbols-outlined text-5xl text-slate-400">extension</span>
+                        <h3 className="mt-2 text-xl font-semibold text-slate-800">Install GitHub App</h3>
+                        <p className="mt-1 text-slate-600">To get started, install the Devyntra GitHub App on your repositories.</p>
+                        <a href="https://github.com/apps/devyntra-deployment-agent" target="_blank" rel="noopener noreferrer" className="mt-4 inline-block bg-blue-600 text-white font-medium py-2 px-6 rounded-full hover:bg-blue-700">
+                            Install GitHub App
+                        </a>
+                    </div>
                 ) : (
                 <div className="flex flex-col md:flex-row items-center gap-4 mb-6">
                     <div className="flex-grow w-full">
@@ -110,7 +121,7 @@ const DeploymentView: React.FC<DeploymentViewProps> = ({
                             id="repo-select"
                             value={selectedRepo}
                             onChange={(e) => onRepoSelect(e.target.value)}
-                            disabled={isDeploying}
+                            disabled={isDeploying || !isGhAppInstalled}
                             className="w-full p-3 bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-600 transition"
                         >
                             <option value="" disabled>Choose a repository...</option>
@@ -121,7 +132,7 @@ const DeploymentView: React.FC<DeploymentViewProps> = ({
                     </div>
                     <button
                         onClick={onDeploy}
-                        disabled={!selectedRepo || isDeploying}
+                        disabled={!selectedRepo || isDeploying || !isGhAppInstalled}
                         className="w-full md:w-auto flex items-center justify-center gap-2 bg-blue-600 text-white font-medium py-3 px-8 rounded-full hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed md:self-end"
                     >
                         {isDeploying ? (

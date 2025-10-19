@@ -3,7 +3,7 @@ import DeploymentView from './DeploymentView';
 import { MOCK_DEPLOYMENT_HISTORY, MOCK_LOGS, INITIAL_DEPLOYMENT_STEPS } from '../constants';
 import { DeploymentHistoryEntry, LogEntry, DeploymentStep, DeploymentStatus } from '../types';
 import { GoogleGenAI } from "@google/genai";
-import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch } from '../src/api';
+import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch, getGithubInstallationStatus, getWorkflowStatus, getWorkflowLogs, startJulesAnalysis } from '../src/api';
 import { auth, observeAuthState, signInWithGitHub } from '../firebase';
 import { updateProfile } from 'firebase/auth';
 import { linkGithub } from '../src/api';
@@ -439,6 +439,7 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const [selectedRepo, setSelectedRepo] = useState<string>('');
   const [repos, setRepos] = useState<{ id: string; name: string }[]>([]);
   const [needsGithubAuth, setNeedsGithubAuth] = useState<boolean>(false);
+  const [isGhAppInstalled, setIsGhAppInstalled] = useState<boolean>(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploymentSteps, setDeploymentSteps] = useState<DeploymentStep[]>(JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS)));
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
@@ -447,6 +448,7 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const [workflowStatus, setWorkflowStatus] = useState<string>('');
   const [workflowConclusion, setWorkflowConclusion] = useState<string | null>(null);
   const [workflowUrl, setWorkflowUrl] = useState<string | null>(null);
+  const [validationRunId, setValidationRunId] = useState<number | null>(null);
   const [pendingDeploymentUrl, setPendingDeploymentUrl] = useState<string | null>(null);
   const [julesSessionId, setJulesSessionId] = useState<string | null>(null);
   const [deployStartedAt, setDeployStartedAt] = useState<number>(0);
@@ -508,6 +510,10 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
         const list = await fetchRepos();
         setRepos(list);
         setNeedsGithubAuth(false);
+
+        const status = await getGithubInstallationStatus();
+        setIsGhAppInstalled(status.isInstalled);
+
       } catch (e) {
         console.error('Failed to fetch repos', e);
         setNeedsGithubAuth(true);
@@ -519,36 +525,22 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     if (!selectedRepo || isDeploying) return;
     resetState();
     setIsDeploying(true);
+    setDeployError('');
+
+    const freshSteps = JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS));
+    freshSteps[0].status = DeploymentStatus.RUNNING;
+    setDeploymentSteps(freshSteps);
+    setCurrentStepIndex(0);
+    setDeployStartedAt(Date.now());
+
     try {
-      setDeployError('');
       const result = await startDeployment(selectedRepo);
       setPendingDeploymentUrl(result.deploymentUrl);
-      if ((result as any).julesSessionId) setJulesSessionId((result as any).julesSessionId);
-      // Enrich first steps with detected framework
-      const framework = (result as any).detectedFramework as string | undefined;
-      // Start at first step with running state
-      const fresh = JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS)) as DeploymentStep[];
-      if (fresh.length > 0) {
-        fresh[0].status = DeploymentStatus.RUNNING;
-        if (framework) {
-          fresh[0].log = `repository_scan_initiated... detected ${framework}.`;
-          fresh[0].details = `Detected ${framework} project.`;
-        }
-      }
-      setDeploymentSteps(fresh);
-      setCurrentStepIndex(0);
-      setDeployStartedAt(Date.now());
-      setSawInProgress(false);
-      setLastStepAdvanceAt(Date.now());
+      setValidationRunId(result.validationRunId);
     } catch (e) {
       const message = (e as Error)?.message || 'Deployment failed';
       console.error('Deployment failed', e);
-      if (message.toLowerCase().includes('github not linked')) {
-        setNeedsGithubAuth(true);
-        setDeployError('GitHub is not authorized. Please authorize to continue.');
-      } else {
-        setDeployError(message);
-      }
+      setDeployError(message);
       setIsDeploying(false);
     }
   };
@@ -576,6 +568,65 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
       setLogFilter(deploymentId);
       setActivePage('logs');
   }, []);
+
+  // Poll for validation workflow completion
+  useEffect(() => {
+    if (!isDeploying || !validationRunId || julesSessionId) return;
+
+    let isCancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const { status, conclusion } = await getWorkflowStatus(selectedRepo, validationRunId);
+        if (isCancelled) return;
+
+        if (status === 'completed') {
+          clearInterval(interval);
+          setDeploymentSteps(prev => {
+            const steps = [...prev];
+            steps[0].status = conclusion === 'success' ? DeploymentStatus.COMPLETED : DeploymentStatus.FAILED;
+            return steps;
+          });
+
+          if (conclusion === 'success') {
+            // Validation succeeded, skip to deployment
+            setDeploymentSteps(prev => {
+                const steps = [...prev];
+                steps[1].status = DeploymentStatus.COMPLETED; // Skip Code Analysis
+                steps[1].details = "Validation passed, skipping AI analysis.";
+                steps[2].status = DeploymentStatus.COMPLETED; // Skip Applying AI Fixes
+                steps[2].details = "No fixes needed.";
+                steps[3].status = DeploymentStatus.RUNNING; // Move to Triggering Deployment
+                return steps;
+            });
+            setCurrentStepIndex(3);
+            await triggerDeployment(selectedRepo);
+            setIsDeploymentTriggered(true);
+          } else {
+            // Validation failed, start Jules analysis
+            const { logs } = await getWorkflowLogs(selectedRepo, validationRunId);
+            const { julesSessionId } = await startJulesAnalysis(selectedRepo, logs);
+            setJulesSessionId(julesSessionId);
+            setDeploymentSteps(prev => {
+                const steps = [...prev];
+                steps[1].status = DeploymentStatus.RUNNING; // Move to Code Analysis
+                return steps;
+            });
+            setCurrentStepIndex(1);
+          }
+        }
+      } catch (e) {
+        console.error('Validation polling error', e);
+        setDeployError((e as Error).message);
+        setIsDeploying(false);
+        clearInterval(interval);
+      }
+    }, 5000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, [isDeploying, validationRunId, selectedRepo, julesSessionId]);
 
   // Poll Jules activities for live logs and completion
   useEffect(() => {
@@ -675,38 +726,18 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     const updateStepsForStatus = (status: string, conclusion: string | null) => {
       setDeploymentSteps(prev => {
         const steps = [...prev];
-        const currentCIIndex = 2; // "Install Dependencies" is the first CI step
+        const triggerStepIndex = 3;
 
-        if (status === 'queued') {
-          setCurrentStepIndex(currentCIIndex);
-        } else if (status === 'in_progress') {
-          setSawInProgress(true);
-          const now = Date.now();
-          // This logic now advances through the *CI-related* steps only
-          if (now - lastStepAdvanceAt > 5000) {
-            setLastStepAdvanceAt(now);
-            setCurrentStepIndex(idx => Math.min(idx + 1, steps.length - 1));
-          }
+        if (status === 'queued' || status === 'in_progress') {
+            steps[triggerStepIndex].status = DeploymentStatus.RUNNING;
+            steps[triggerStepIndex].log = `CI pipeline is ${status.replace('_', ' ')}...`;
         } else if (status === 'completed') {
           if (conclusion === 'success') {
-            // Mark all remaining steps as complete
-            for (let i = currentStepIndex; i < steps.length; i++) {
-                steps[i].status = DeploymentStatus.COMPLETED;
-            }
-            setCurrentStepIndex(steps.length);
+            steps[triggerStepIndex].status = DeploymentStatus.COMPLETED;
           } else {
-            const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
-            if (runningIdx >= 0) steps[runningIdx].status = DeploymentStatus.FAILED;
+            steps[triggerStepIndex].status = DeploymentStatus.FAILED;
           }
         }
-
-        // Update statuses based on index, respecting pre-CI steps
-        steps.forEach((step, idx) => {
-            if (idx < currentStepIndex) step.status = DeploymentStatus.COMPLETED;
-            else if (idx === currentStepIndex) step.status = DeploymentStatus.RUNNING;
-            else step.status = DeploymentStatus.PENDING;
-        });
-
         return steps;
       });
     };
@@ -757,6 +788,7 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
             repos={repos}
             error={deployError}
             needsGithubAuth={needsGithubAuth}
+            isGhAppInstalled={isGhAppInstalled}
             onAuthorizeGithub={async () => {
               try {
                 const { githubAccessToken } = await signInWithGitHub();

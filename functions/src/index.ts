@@ -263,6 +263,38 @@ app.get('/deployments', requireAuth, async (req: AuthenticatedRequest, res: Resp
 });
 
 // GitHub user profile
+app.get('/github/installation-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const uid = req.uid as string;
+  try {
+    const doc = await db.collection('githubTokens').doc(uid).get();
+    if (!doc.exists) {
+      return res.json({ isInstalled: false });
+    }
+    const token = (doc.data() as GitHubToken).accessToken;
+
+    const response = await fetch('https://api.github.com/user/installations', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json'
+      }
+    });
+
+    if (!response.ok) {
+      // If the token is invalid or permissions are revoked, they'll need to re-auth.
+      return res.json({ isInstalled: false });
+    }
+
+    const data = await response.json() as { installations: { app_id: number }[] };
+    const isInstalled = data.installations.some(inst => inst.app_id === parseInt(GITHUB_APP_ID, 10));
+
+    res.json({ isInstalled });
+
+  } catch (e) {
+    console.error('Failed to get installation status', e);
+    res.status(500).json({ error: 'Failed to get installation status' });
+  }
+});
+
 app.get('/github/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const uid = req.uid as string;
   const doc = await db.collection('githubTokens').doc(uid).get();
@@ -292,6 +324,59 @@ app.get('/deploy/status', requireAuth, async (req: AuthenticatedRequest, res: Re
   if (!resp.ok) return res.status(resp.status).json(data);
   const run = (data.workflow_runs && data.workflow_runs[0]) || null;
   res.json({ status: run?.status || 'unknown', conclusion: run?.conclusion || null, html_url: run?.html_url || null });
+});
+
+app.get('/github/workflow-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const { repoFullName, runId } = req.query;
+    if (!repoFullName || !runId) {
+        return res.status(400).json({ error: 'repoFullName and runId are required' });
+    }
+    const uid = req.uid as string;
+    const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+    if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+    const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+
+    try {
+        const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}`, {
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+        });
+        const data = await resp.json();
+        if (!resp.ok) return res.status(resp.status).json(data);
+        res.json({ status: data.status, conclusion: data.conclusion });
+    } catch (e) {
+        console.error('Failed to get workflow status', e);
+        res.status(500).json({ error: 'Failed to get workflow status' });
+    }
+});
+
+app.get('/github/workflow-logs', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const { repoFullName, runId } = req.query;
+    if (!repoFullName || !runId) {
+        return res.status(400).json({ error: 'repoFullName and runId are required' });
+    }
+    const uid = req.uid as string;
+    const tokenDoc = await db.collection('githubTokens').doc(uid).get();
+    if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
+    const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+
+    try {
+        const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}/logs`, {
+            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+        });
+        if (!resp.ok) {
+            // Log URLs are often transient. If it fails, link to the run itself.
+            const runResp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}`, {
+                headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+            });
+            const runData = await runResp.json();
+            return res.status(200).json({ logs: `Could not retrieve logs. View them on GitHub: ${runData.html_url}` });
+        }
+        const logs = await resp.text();
+        res.json({ logs });
+    } catch (e) {
+        console.error('Failed to get workflow logs', e);
+        res.status(500).json({ error: 'Failed to get workflow logs' });
+    }
 });
 
 // Jules session status and activities
@@ -355,183 +440,107 @@ app.post('/jules/send', requireAuth, async (req: AuthenticatedRequest, res: Resp
 app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { repoFullName } = req.body as { repoFullName?: string };
   if (!repoFullName) return res.status(400).json({ error: 'repoFullName required' });
-  const uid = req.uid as string;
   const [owner, repo] = repoFullName.split('/');
 
-  const appToken = await getGitHubAppToken();
-  const installationResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/installation`, {
-      headers: {
-          Authorization: `Bearer ${appToken}`,
-          Accept: 'application/vnd.github+json',
-      },
-  });
-  if (!installationResponse.ok) {
-      return res.status(400).json({ error: 'GitHub App not installed on this repository' });
-  }
-  const installation = await installationResponse.json() as { id: number };
-  const installationId = installation.id;
-
-  const ghToken = await getInstallationAccessToken(installationId);
-
-  const treeResp = await fetch(`https://api.github.com/repos/${repoFullName}/git/trees/HEAD?recursive=1`, {
-      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
-  });
-  const tree = (await treeResp.json()) as GitTree;
-  if (!treeResp.ok) return res.status(treeResp.status).json(tree);
-  const paths: string[] = (tree.tree || []).map((t) => t.path);
-  const isNode = paths.includes('package.json') || paths.some((p) => p.endsWith('package.json'));
-  const detectedFramework = (() => {
-    const has = (p: string) => paths.some((x) => x.toLowerCase().includes(p));
-    if (has('next.config')) return 'Next.js';
-    if (has('angular.json')) return 'Angular';
-    if (has('vite.config')) return 'Vite';
-    if (has('vue.config') || has('src/main.ts') && has('src/App.vue')) return 'Vue';
-    return isNode ? 'Node.js' : 'Unknown';
-  })();
-
-  const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
-    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
-  });
-  const repoMeta = await repoResp.json() as RepoMetadata;
-  const defaultBranch = repoResp.ok && repoMeta.default_branch ? repoMeta.default_branch : 'main';
-
-  if (!isNode) {
-    return res.status(400).json({ error: 'Unsupported repository type. A package.json was not found. Currently only Node.js repos are supported.' });
-  }
-
-  const workflowPath = '.github/workflows/ci.yml';
-  const getFileResp = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
-    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
-  });
-
-  const gcpSecrets = {
-    GCP_PROJECT: process.env.GCP_PROJECT || 'devyntra-500e4',
-    GCP_REGION: process.env.GCP_REGION || 'us-central1',
-    AR_REPO: 'devyntra-images',
-    SERVICE_NAME: repo,
-    REPO_NAME: repo
-  };
-
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-  const templatePath = path.join(__dirname, 'workflow-template.yml');
-  let workflowYml: string;
   try {
-    workflowYml = fs.readFileSync(templatePath, 'utf8');
-  } catch (error) {
-    console.error('Error reading workflow template:', error);
-    return res.status(500).json({ error: 'Failed to read workflow template' });
-  }
-
-  for (const [key, value] of Object.entries(gcpSecrets)) {
-    workflowYml = workflowYml.replace(new RegExp(`__${key}__`, 'g'), value);
-  }
-
-  const desiredContentB64 = Buffer.from(workflowYml).toString('base64');
-
-  if (getFileResp.status === 404) {
-    await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${ghToken}`,
-        Accept: 'application/vnd.github+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ message: 'chore(ci): add GitHub Actions workflow', content: desiredContentB64 })
+    const appToken = await getGitHubAppToken();
+    const installationResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/installation`, {
+        headers: {
+            Authorization: `Bearer ${appToken}`,
+            Accept: 'application/vnd.github+json',
+        },
     });
-  } else if (getFileResp.ok) {
-    const existing = await getFileResp.json() as GitHubFile;
-    if (existing.content.replace(/\s/g, '') !== desiredContentB64.replace(/\s/g, '')) {
-      await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(workflowPath)}`, {
+    if (!installationResponse.ok) {
+        return res.status(400).json({ error: 'GitHub App not installed on this repository' });
+    }
+    const installation = await installationResponse.json() as { id: number };
+    const ghToken = await getInstallationAccessToken(installation.id);
+
+    const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    const repoMeta = await repoResp.json() as RepoMetadata;
+    const defaultBranch = repoResp.ok ? repoMeta.default_branch : 'main';
+
+    const workflowPath = '.github/workflows/validation.yml';
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const templatePath = path.join(__dirname, 'validation-workflow-template.yml');
+    const workflowYml = fs.readFileSync(templatePath, 'utf8');
+    const contentB64 = Buffer.from(workflowYml).toString('base64');
+
+    await fetch(`https://api.github.com/repos/${repoFullName}/contents/${workflowPath}`, {
         method: 'PUT',
         headers: {
-          Authorization: `Bearer ${ghToken}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json'
+            Authorization: `Bearer ${ghToken}`,
+            'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ message: 'chore(ci): update workflow', content: desiredContentB64, sha: existing.sha })
-      });
-    }
-  }
-
-  if (isNode) {
-    const dockerfilePath = 'Dockerfile';
-    const getDockerfile = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
-      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+        body: JSON.stringify({
+            message: 'chore: add validation workflow',
+            content: contentB64,
+            branch: defaultBranch
+        })
     });
-    if (getDockerfile.status === 404) {
-      const dockerfile = Buffer.from(`FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nEXPOSE 3000\nCMD ["npm", "start"]\n`).toString('base64');
-      await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(dockerfilePath)}`, {
-        method: 'PUT',
+
+    await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/validation.yml/dispatches`, {
+        method: 'POST',
         headers: {
-          Authorization: `Bearer ${ghToken}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json'
+            Authorization: `Bearer ${ghToken}`,
+            'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ message: 'chore(docker): add Dockerfile', content: dockerfile })
-      });
-    }
-  }
-
-  try {
-    const keyResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/public-key`, {
-      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+        body: JSON.stringify({ ref: defaultBranch })
     });
-    if (keyResp.ok) {
-      const keyData = await keyResp.json() as { key: string; key_id: string };
-      await sodium.ready;
-      const { key, key_id } = keyData;
-      const encrypt = (value: string) => {
-        const binkey = sodium.from_base64(key, sodium.base64_variants.ORIGINAL);
-        const binsec = sodium.from_string(value);
-        const encBytes = sodium.crypto_box_seal(binsec, binkey);
-        return sodium.to_base64(encBytes, sodium.base64_variants.ORIGINAL);
-      };
 
-      for (const [name, value] of Object.entries(gcpSecrets)) {
-        const encrypted_value = encrypt(value);
-        await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/${name}`, {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ encrypted_value, key_id })
-        });
-      }
+    // Short delay to allow GitHub to initiate the run
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
-      const serviceAccountKey = gcloudServiceKey.value();
-      if (serviceAccountKey) {
-        try {
-          const minifiedKey = JSON.stringify(JSON.parse(serviceAccountKey));
-          const encrypted_key = encrypt(minifiedKey);
-          await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/secrets/GCP_CREDENTIALS`, {
-            method: 'PUT',
-            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-            body: JSON.stringify({ encrypted_value: encrypted_key, key_id })
-          });
-        } catch (e) {
-          console.error('Invalid service account key JSON:', e);
-          // Optionally, you could return an error response to the user here
-        }
-      }
+    const runsResp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/validation.yml/runs?per_page=1`, {
+        headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+    });
+    const runsData = await runsResp.json() as WorkflowRunsResponse;
+    const latestRun = runsData.workflow_runs?.[0];
+
+    if (!latestRun) {
+        throw new Error('Could not find validation workflow run.');
     }
+
+    res.json({
+        validationRunId: latestRun.id,
+        deploymentUrl: `https://cloud-run-simulated.devyntra.app/${encodeURIComponent(repoFullName)}`
+    });
+
   } catch (e) {
-    console.error('Failed setting repo secrets', e);
+    console.error('Deployment start error', e);
+    res.status(500).json({ error: 'Failed to start deployment' });
   }
+});
 
+app.post('/start-jules-analysis', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const { repoFullName, logs } = req.body as { repoFullName?: string; logs?: string };
+    if (!repoFullName || !logs) {
+        return res.status(400).json({ error: 'repoFullName and logs are required' });
+    }
+    const [owner, repo] = repoFullName.split('/');
 
-  let julesSessionId: string | null = null;
-  try {
-    const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
-    if (julesApiKeyValue) {
-      const prompt = `You are a CI fixer agent. Your primary goal is to ensure the repository can be successfully deployed.
+    try {
+        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
+        if (!julesApiKeyValue) {
+            return res.status(500).json({ error: 'Jules AI is not configured on the backend.' });
+        }
+
+        const prompt = `You are a CI fixer agent. Your primary goal is to ensure the repository can be successfully deployed. The validation workflow failed with the following logs:
+
+${logs}
 
 **Your tasks are:**
-1.  Clone the repository.
-2.  Install all necessary dependencies.
-3.  Run the build and test scripts.
-4.  Identify and fix any errors that prevent the application from building or running.
-5.  If essential files like \`package.json\` are missing, create them with the necessary content.
-6.  If build or test scripts are missing from \`package.json\`, add minimal, functional scripts.
-7.  When you are finished, do not push the changes. Instead, output a list of all the files you have changed, in the following format:
+1.  Analyze the logs to identify the root cause of the failure.
+2.  Clone the repository.
+3.  Install all necessary dependencies.
+4.  Run the build and test scripts.
+5.  Identify and fix any errors that prevent the application from building or running.
+6.  If essential files like \`package.json\` are missing, create them with the necessary content.
+7.  If build or test scripts are missing from \`package.json\`, add minimal, functional scripts.
+8.  When you are finished, do not push the changes. Instead, output a list of all the files you have changed, in the following format:
 
 \`\`\`json
 [
@@ -543,35 +552,29 @@ app.post('/deploy', requireAuth, async (req: AuthenticatedRequest, res: Response
 \`\`\`
 
 Keep your changes as minimal as possible, but ensure they are sufficient to get the CI pipeline to pass.`;
-      const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
-        body: JSON.stringify({
-          prompt,
-          sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: 'main' } },
-          title: `Devyntra deploy: ${repoFullName}`
-        })
-      });
-      if (julesResp.ok) {
+
+        const julesResp = await fetch('https://jules.googleapis.com/v1alpha/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': julesApiKeyValue },
+            body: JSON.stringify({
+                prompt,
+                sourceContext: { source: `sources/github/${owner}/${repo}`, githubRepoContext: { startingBranch: 'main' } },
+                title: `Devyntra deploy: ${repoFullName}`
+            })
+        });
+
+        if (!julesResp.ok) {
+            const errorData = await julesResp.json();
+            throw new Error(errorData.error?.message || 'Failed to start Jules session');
+        }
+
         const julesData = await julesResp.json() as JulesSession;
-        julesSessionId = (julesData.name || julesData.id || '').toString();
-      }
+        res.json({ julesSessionId: (julesData.name || julesData.id || '').toString() });
+
+    } catch (e) {
+        console.error('Jules session error', e);
+        res.status(500).json({ error: 'Failed to start Jules analysis' });
     }
-  } catch (e) {
-    console.error('Jules session error', e);
-  }
-
-  const deploymentUrl = `https://cloud-run-simulated.devyntra.app/${encodeURIComponent(repoFullName)}`;
-
-  res.json({
-    detectedStack: isNode ? 'node' : 'unknown',
-    detectedFramework,
-    workflowEnsured: true,
-    dockerfileEnsured: isNode,
-    dockerHubSecretsSet: true,
-    julesSessionId,
-    deploymentUrl
-  });
 });
 
 app.post('/trigger-deployment', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

@@ -11,43 +11,29 @@ export const MOCK_REPOS: Repository[] = [
 export const INITIAL_DEPLOYMENT_STEPS: DeploymentStep[] = [
   {
     id: 1,
+    title: 'Repository Validation',
+    details: 'Checking for required files and common errors.',
+    status: DeploymentStatus.PENDING,
+    log: 'Validating repository...'
+  },
+  {
+    id: 2,
     title: 'Code Analysis',
     details: 'Jules AI is analyzing your code for errors.',
     status: DeploymentStatus.PENDING,
     log: 'Jules AI agent deployed...'
   },
   {
-    id: 2,
+    id: 3,
     title: 'Applying AI Fixes',
     details: 'Jules AI is committing the fixes to a new branch and creating a pull request.',
     status: DeploymentStatus.PENDING,
     log: ''
   },
   {
-    id: 3,
-    title: 'Install Dependencies',
-    details: 'Setting up virtual environment and installing required packages.',
-    status: DeploymentStatus.PENDING,
-    log: ''
-  },
-  {
     id: 4,
-    title: 'Build & Test',
-    details: 'Executing the CI/CD pipeline to ensure application integrity.',
-    status: DeploymentStatus.PENDING,
-    log: ''
-  },
-  {
-    id: 5,
-    title: 'Create Docker Image',
-    details: 'Building a containerized Docker image for consistent deployment.',
-    status: DeploymentStatus.PENDING,
-    log: ''
-  },
-  {
-    id: 6,
-    title: 'Deploy to Production (Cloud Run)',
-    details: 'Deploying the application to Google Cloud Run.',
+    title: 'Triggering Deployment',
+    details: 'Starting the CI/CD pipeline to deploy your application.',
     status: DeploymentStatus.PENDING,
     log: ''
   },

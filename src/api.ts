@@ -31,7 +31,7 @@ export async function fetchRepos(): Promise<{ id: string; name: string }[]> {
   return res.json();
 }
 
-export async function startDeployment(repoFullName: string): Promise<{ deploymentUrl: string; detectedStack: string }>{
+export async function startDeployment(repoFullName: string): Promise<{ validationRunId: number; deploymentUrl: string }>{
   const headers = await authHeader();
   const res = await fetch(`${baseUrl}/deploy`, {
     method: 'POST',
@@ -49,11 +49,51 @@ export async function startDeployment(repoFullName: string): Promise<{ deploymen
   return res.json();
 }
 
+export async function getWorkflowStatus(repoFullName: string, runId: number): Promise<{ status: string; conclusion: string | null }> {
+    const headers = await authHeader();
+    const url = `${baseUrl}/github/workflow-status?repoFullName=${encodeURIComponent(repoFullName)}&runId=${runId}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error('Failed to get workflow status');
+    return res.json();
+}
+
+export async function getWorkflowLogs(repoFullName: string, runId: number): Promise<{ logs: string }> {
+    const headers = await authHeader();
+    const url = `${baseUrl}/github/workflow-logs?repoFullName=${encodeURIComponent(repoFullName)}&runId=${runId}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error('Failed to get workflow logs');
+    return res.json();
+}
+
+export async function startJulesAnalysis(repoFullName: string, logs: string): Promise<{ julesSessionId: string }> {
+    const headers = await authHeader();
+    const res = await fetch(`${baseUrl}/start-jules-analysis`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ repoFullName, logs })
+    });
+    if (!res.ok) {
+        try {
+            const data = await res.json();
+            throw new Error(data?.error || 'Failed to start Jules analysis');
+        } catch {
+            throw new Error('Failed to start Jules analysis');
+        }
+    }
+    return res.json();
+}
 
 export async function getGithubMe(): Promise<{ login: string; name: string; avatar_url: string; html_url: string }> {
   const headers = await authHeader();
   const res = await fetch(`${baseUrl}/github/me`, { headers });
   if (!res.ok) throw new Error('Failed to load GitHub profile');
+  return res.json();
+}
+
+export async function getGithubInstallationStatus(): Promise<{ isInstalled: boolean }> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/github/installation-status`, { headers });
+  if (!res.ok) throw new Error('Failed to fetch GitHub App installation status');
   return res.json();
 }
 
