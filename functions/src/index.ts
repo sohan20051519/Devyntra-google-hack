@@ -126,6 +126,18 @@ async function getInstallationAccessToken(installationId: number): Promise<strin
     return data.token;
 }
 
+async function getInstallationTokenForUser(uid: string): Promise<string> {
+    const userProfileDoc = await db.collection('userProfiles').doc(uid).get();
+    if (!userProfileDoc.exists) {
+        throw new Error('User profile not found');
+    }
+    const installationId = userProfileDoc.data()?.githubInstallationId;
+    if (!installationId) {
+        throw new Error('GitHub App installation ID not found for user');
+    }
+    return getInstallationAccessToken(installationId);
+}
+
 // Exchange a GitHub OAuth code for an access token and store it
 app.post('/auth/github', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const { code } = req.body as { code?: string };
@@ -156,21 +168,24 @@ app.post('/auth/github', requireAuth, async (req: AuthenticatedRequest, res: Res
 
 // List repositories for the authenticated user (selected/all scopes handled by GitHub OAuth)
 app.get('/repos', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const uid = req.uid as string;
-  const doc = await db.collection('githubTokens').doc(uid).get();
-  if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const token = (doc.data() as GitHubToken).accessToken;
-  const response = await fetch('https://api.github.com/user/repos?per_page=100', {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json'
+    const uid = req.uid as string;
+    try {
+        const token = await getInstallationTokenForUser(uid);
+        const response = await fetch('https://api.github.com/installation/repositories?per_page=100', {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: 'application/vnd.github+json',
+            },
+        });
+        const data = await response.json() as { repositories: GitHubRepo[] };
+        if (!response.ok) {
+            return res.status(response.status).json(data);
+        }
+        res.json(data.repositories.map((r) => ({ id: String(r.id), name: r.full_name })));
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+        res.status(400).json({ error: `Could not list repositories: ${errorMessage}` });
     }
-  });
-  const data = await response.json() as GitHubRepo[];
-  if (!response.ok) return res.status(response.status).json(data);
-  res.json(
-    data.map((r) => ({ id: String(r.id), name: r.full_name }))
-  );
 });
 
 // Receive webhook from CI with the deployed Cloud Run URL
@@ -224,43 +239,38 @@ app.get('/projects', requireAuth, async (req: AuthenticatedRequest, res: Respons
 
 // List deployments (latest) for the authenticated user's repos
 app.get('/deployments', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const uid = req.uid as string;
-    const doc = await db.collection('githubTokens').doc(uid).get();
-    if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-    const token = (doc.data() as GitHubToken).accessToken;
-
-    const response = await fetch('https://api.github.com/user/repos?per_page=100', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json'
-      }
-    });
-    const repos = await response.json() as GitHubRepo[];
-    if (!response.ok) return res.status(response.status).json(repos);
-
-    const fullNames: string[] = repos.map((r) => r.full_name);
-
-    const results: { repoFullName: string; url: string | null; updatedAt: string | null }[] = [];
-    const tasks = fullNames.map(async (name) => {
-      const snap = await db.collection('deployments').doc(name).get();
-      const data = snap.exists ? snap.data() : null;
-      results.push({ repoFullName: name, url: data?.latestUrl || null, updatedAt: data?.updatedAt || null });
-    });
-    await Promise.all(tasks);
-
-    results.sort((a, b) => {
-      if (!a.updatedAt && !b.updatedAt) return 0;
-      if (!a.updatedAt) return 1;
-      if (!b.updatedAt) return -1;
-      return a.updatedAt > b.updatedAt ? -1 : 1;
-    });
-
-    res.json({ items: results });
-  } catch (e) {
-    console.error('list deployments error', e);
-    res.status(500).json({ error: 'Failed to list deployments' });
-  }
+    try {
+        const uid = req.uid as string;
+        const token = await getInstallationTokenForUser(uid);
+        const response = await fetch('https://api.github.com/installation/repositories?per_page=100', {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: 'application/vnd.github+json',
+            },
+        });
+        const repoData = await response.json() as { repositories: GitHubRepo[] };
+        if (!response.ok) {
+            return res.status(response.status).json(repoData);
+        }
+        const fullNames: string[] = repoData.repositories.map((r) => r.full_name);
+        const results: { repoFullName: string; url: string | null; updatedAt: string | null }[] = [];
+        const tasks = fullNames.map(async (name) => {
+            const snap = await db.collection('deployments').doc(name).get();
+            const data = snap.exists ? snap.data() : null;
+            results.push({ repoFullName: name, url: data?.latestUrl || null, updatedAt: data?.updatedAt || null });
+        });
+        await Promise.all(tasks);
+        results.sort((a, b) => {
+            if (!a.updatedAt && !b.updatedAt) return 0;
+            if (!a.updatedAt) return 1;
+            if (!b.updatedAt) return -1;
+            return a.updatedAt > b.updatedAt ? -1 : 1;
+        });
+        res.json({ items: results });
+    } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        res.status(500).json({ error: `Failed to list deployments: ${errorMessage}` });
+    }
 });
 
 // GitHub user profile
@@ -368,19 +378,22 @@ app.get('/github/me', requireAuth, async (req: AuthenticatedRequest, res: Respon
 
 // Latest workflow run status
 app.get('/deploy/status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const repoFullName = req.query.repo as string | undefined;
-  if (!repoFullName) return res.status(400).json({ error: 'repo query required' });
-  const uid = req.uid as string;
-  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
-  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
-  const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs?per_page=1`, {
-    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
-  });
-  const data = await resp.json() as WorkflowRunsResponse;
-  if (!resp.ok) return res.status(resp.status).json(data);
-  const run = (data.workflow_runs && data.workflow_runs[0]) || null;
-  res.json({ status: run?.status || 'unknown', conclusion: run?.conclusion || null, html_url: run?.html_url || null });
+    const repoFullName = req.query.repo as string | undefined;
+    if (!repoFullName) return res.status(400).json({ error: 'repo query required' });
+    const uid = req.uid as string;
+    try {
+        const token = await getInstallationTokenForUser(uid);
+        const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs?per_page=1`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+        });
+        const data = await resp.json() as WorkflowRunsResponse;
+        if (!resp.ok) return res.status(resp.status).json(data);
+        const run = (data.workflow_runs && data.workflow_runs[0]) || null;
+        res.json({ status: run?.status || 'unknown', conclusion: run?.conclusion || null, html_url: run?.html_url || null });
+    } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        res.status(500).json({ error: `Failed to get deployment status: ${errorMessage}` });
+    }
 });
 
 app.get('/github/workflow-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -389,20 +402,17 @@ app.get('/github/workflow-status', requireAuth, async (req: AuthenticatedRequest
         return res.status(400).json({ error: 'repoFullName and runId are required' });
     }
     const uid = req.uid as string;
-    const tokenDoc = await db.collection('githubTokens').doc(uid).get();
-    if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-    const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
-
     try {
+        const token = await getInstallationTokenForUser(uid);
         const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}`, {
-            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
         });
         const data: any = await resp.json();
         if (!resp.ok) return res.status(resp.status).json(data);
         res.json({ status: data.status, conclusion: data.conclusion });
     } catch (e) {
-        console.error('Failed to get workflow status', e);
-        res.status(500).json({ error: 'Failed to get workflow status' });
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        res.status(500).json({ error: `Failed to get workflow status: ${errorMessage}` });
     }
 });
 
@@ -412,18 +422,15 @@ app.get('/github/workflow-logs', requireAuth, async (req: AuthenticatedRequest, 
         return res.status(400).json({ error: 'repoFullName and runId are required' });
     }
     const uid = req.uid as string;
-    const tokenDoc = await db.collection('githubTokens').doc(uid).get();
-    if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-    const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
-
     try {
+        const token = await getInstallationTokenForUser(uid);
         const resp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}/logs`, {
-            headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
         });
         if (!resp.ok) {
             // Log URLs are often transient. If it fails, link to the run itself.
             const runResp = await fetch(`https://api.github.com/repos/${repoFullName}/actions/runs/${runId}`, {
-                headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
+                headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
             });
             const runData: any = await runResp.json();
             return res.status(200).json({ logs: `Could not retrieve logs. View them on GitHub: ${runData.html_url}` });
@@ -431,8 +438,8 @@ app.get('/github/workflow-logs', requireAuth, async (req: AuthenticatedRequest, 
         const logs = await resp.text();
         res.json({ logs });
     } catch (e) {
-        console.error('Failed to get workflow logs', e);
-        res.status(500).json({ error: 'Failed to get workflow logs' });
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        res.status(500).json({ error: `Failed to get workflow logs: ${errorMessage}` });
     }
 });
 
@@ -635,130 +642,124 @@ Keep your changes as minimal as possible, but ensure they are sufficient to get 
 });
 
 app.post('/trigger-deployment', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const { repoFullName } = req.body as { repoFullName?: string };
-  if (!repoFullName) return res.status(400).json({ error: 'repoFullName required' });
-  const uid = req.uid as string;
-  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
-  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+    const { repoFullName } = req.body as { repoFullName?: string };
+    if (!repoFullName) return res.status(400).json({ error: 'repoFullName required' });
+    const uid = req.uid as string;
+    try {
+        const token = await getInstallationTokenForUser(uid);
+        const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+        });
+        const repoMeta = await repoResp.json() as RepoMetadata;
+        const defaultBranch = repoResp.ok && repoMeta.default_branch ? repoMeta.default_branch : 'main';
 
-  const repoResp = await fetch(`https://api.github.com/repos/${repoFullName}`, {
-    headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' }
-  });
-  const repoMeta = await repoResp.json() as RepoMetadata;
-  const defaultBranch = repoResp.ok && repoMeta.default_branch ? repoMeta.default_branch : 'main';
-
-  try {
-    await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/ci.yml/dispatches`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ref: defaultBranch })
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('workflow_dispatch error', e);
-    res.status(500).json({ error: 'Failed to trigger deployment' });
-  }
+        await fetch(`https://api.github.com/repos/${repoFullName}/actions/workflows/ci.yml/dispatches`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref: defaultBranch })
+        });
+        res.json({ ok: true });
+    } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        res.status(500).json({ error: `Failed to trigger deployment: ${errorMessage}` });
+    }
 });
 
 app.post('/apply-patch', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const { repoFullName, julesSessionId } = req.body as { repoFullName?: string, julesSessionId?: string };
-  if (!repoFullName || !julesSessionId) return res.status(400).json({ error: 'repoFullName and julesSessionId required' });
-  const uid = req.uid as string;
-  const tokenDoc = await db.collection('githubTokens').doc(uid).get();
-  if (!tokenDoc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const ghToken = (tokenDoc.data() as GitHubToken).accessToken;
+    const { repoFullName, julesSessionId } = req.body as { repoFullName?: string, julesSessionId?: string };
+    if (!repoFullName || !julesSessionId) return res.status(400).json({ error: 'repoFullName and julesSessionId required' });
+    const uid = req.uid as string;
+    const newBranchName = `jules-patch-${Date.now()}`;
+    let ghToken: string;
 
-  const newBranchName = `jules-patch-${Date.now()}`;
+    try {
+        ghToken = await getInstallationTokenForUser(uid);
+        const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
+        if (!julesApiKeyValue) return res.status(500).json({ error: 'Jules not configured' });
 
-  try {
-    const julesApiKeyValue = (julesApiKey.value() || process.env.JULES_API_KEY || '').trim();
-    if (!julesApiKeyValue) return res.status(500).json({ error: 'Jules not configured' });
+        const sessionResp = await fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(julesSessionId)}`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } });
+        const session = await sessionResp.json() as JulesSession;
 
-    const sessionResp = await fetch(`https://jules.googleapis.com/v1alpha/sessions/${encodeURIComponent(julesSessionId)}`, { headers: { 'X-Goog-Api-Key': julesApiKeyValue } });
-    const session = await sessionResp.json() as JulesSession;
+        const summary = session.result?.summary;
+        if (!summary) return res.status(500).json({ error: 'Jules session has no result' });
 
-    const summary = session.result?.summary;
-    if (!summary) return res.status(500).json({ error: 'Jules session has no result' });
+        const changedFiles = JSON.parse(summary) as { path: string, content: string }[];
+        if (!changedFiles || !Array.isArray(changedFiles)) return res.status(500).json({ error: 'Invalid patch format from Jules' });
 
-    const changedFiles = JSON.parse(summary) as { path: string, content: string }[];
-    if (!changedFiles || !Array.isArray(changedFiles)) return res.status(500).json({ error: 'Invalid patch format from Jules' });
+        const repoInfo = await fetch(`https://api.github.com/repos/${repoFullName}`);
+        const repoData = await repoInfo.json() as RepoMetadata;
+        const mainBranch = repoData.default_branch || 'main';
 
-    const [owner, repo] = repoFullName.split('/');
+        const branchInfo = await fetch(`https://api.github.com/repos/${repoFullName}/branches/${mainBranch}`);
+        const branchData = await branchInfo.json() as { commit: { sha: string } };
+        const latestCommitSha = branchData.commit.sha;
 
-    const repoInfo = await fetch(`https://api.github.com/repos/${repoFullName}`);
-    const repoData = await repoInfo.json() as RepoMetadata;
-    const mainBranch = repoData.default_branch || 'main';
-
-    const branchInfo = await fetch(`https://api.github.com/repos/${repoFullName}/branches/${mainBranch}`);
-    const branchData = await branchInfo.json() as { commit: { sha: string } };
-    const latestCommitSha = branchData.commit.sha;
-
-    await fetch(`https://api.github.com/repos/${repoFullName}/git/refs`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ref: `refs/heads/${newBranchName}`,
-        sha: latestCommitSha,
-      }),
-    });
-
-    for (const file of changedFiles) {
-        await fetch(`https://api.github.com/repos/${repoFullName}/contents/${file.path}`, {
-            method: 'PUT',
+        await fetch(`https://api.github.com/repos/${repoFullName}/git/refs`, {
+            method: 'POST',
             headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                message: `Jules AI fix for ${file.path}`,
-                content: Buffer.from(file.content).toString('base64'),
-                branch: newBranchName,
+                ref: `refs/heads/${newBranchName}`,
+                sha: latestCommitSha,
             }),
         });
-    }
 
-    const prResponse = await fetch(`https://api.github.com/repos/${repoFullName}/pulls`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: 'Jules AI Fixes',
-        head: newBranchName,
-        base: mainBranch,
-        body: 'This PR contains automated fixes from the Jules AI agent.',
-      }),
-    });
-    const prData = await prResponse.json() as { number: number, message?: string };
-    if (prData.message) {
-      // If there are no changes, GitHub will return an error
-      if (prData.message.includes('No commits between')) {
-        res.json({ ok: true, message: 'No changes to apply' });
-        return;
-      }
-      throw new Error(prData.message);
-    }
-
-    const mergeResponse = await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prData.number}/merge`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
-    });
-
-    if (!mergeResponse.ok) {
-        const mergeData = await mergeResponse.json() as { message: string };
-        if (mergeData.message.includes('merge conflict')) {
-            throw new Error('Merge conflict when applying Jules patch');
+        for (const file of changedFiles) {
+            await fetch(`https://api.github.com/repos/${repoFullName}/contents/${file.path}`, {
+                method: 'PUT',
+                headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: `Jules AI fix for ${file.path}`,
+                    content: Buffer.from(file.content).toString('base64'),
+                    branch: newBranchName,
+                }),
+            });
         }
-        throw new Error(mergeData.message);
-    }
 
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('Failed to apply patch', e);
-    res.status(500).json({ error: 'Failed to apply patch' });
-  } finally {
-    // Clean up the temporary branch
-    await fetch(`https://api.github.com/repos/${repoFullName}/git/refs/heads/${newBranchName}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${ghToken}` },
-    });
-  }
+        const prResponse = await fetch(`https://api.github.com/repos/${repoFullName}/pulls`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: 'Jules AI Fixes',
+                head: newBranchName,
+                base: mainBranch,
+                body: 'This PR contains automated fixes from the Jules AI agent.',
+            }),
+        });
+        const prData = await prResponse.json() as { number: number, message?: string };
+        if (prData.message) {
+            if (prData.message.includes('No commits between')) {
+                res.json({ ok: true, message: 'No changes to apply' });
+                return;
+            }
+            throw new Error(prData.message);
+        }
+
+        const mergeResponse = await fetch(`https://api.github.com/repos/${repoFullName}/pulls/${prData.number}/merge`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${ghToken}`, 'Content-Type': 'application/json' },
+        });
+
+        if (!mergeResponse.ok) {
+            const mergeData = await mergeResponse.json() as { message: string };
+            if (mergeData.message.includes('merge conflict')) {
+                throw new Error('Merge conflict when applying Jules patch');
+            }
+            throw new Error(mergeData.message);
+        }
+
+        res.json({ ok: true });
+    } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred';
+        res.status(500).json({ error: `Failed to apply patch: ${errorMessage}` });
+    } finally {
+        // Clean up the temporary branch
+        if (ghToken) {
+            await fetch(`https://api.github.com/repos/${repoFullName}/git/refs/heads/${newBranchName}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${ghToken}` },
+            });
+        }
+    }
 });
 
 export const api = onRequest({
