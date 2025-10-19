@@ -670,7 +670,7 @@ app.post('/apply-patch', requireAuth, async (req: AuthenticatedRequest, res: Res
     if (!repoFullName || !julesSessionId) return res.status(400).json({ error: 'repoFullName and julesSessionId required' });
     const uid = req.uid as string;
     const newBranchName = `jules-patch-${Date.now()}`;
-    let ghToken: string;
+    let ghToken = '';
 
     try {
         ghToken = await getInstallationTokenForUser(uid);
