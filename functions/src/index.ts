@@ -276,6 +276,38 @@ app.get('/github/me', requireAuth, async (req: AuthenticatedRequest, res: Respon
   res.json({ login: data.login, name: data.name, avatar_url: data.avatar_url, html_url: data.html_url });
 });
 
+// Check if the user has the GitHub App installed
+app.get('/github/installation-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const uid = req.uid as string;
+  const doc = await db.collection('githubTokens').doc(uid).get();
+  if (!doc.exists) {
+    return res.status(400).json({ error: 'GitHub not linked' });
+  }
+  const token = (doc.data() as GitHubToken).accessToken;
+
+  try {
+    const response = await fetch('https://api.github.com/user/installations', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('Failed to fetch user installations:', errorData);
+      return res.status(response.status).json({ installed: false, error: 'Could not verify installation status.' });
+    }
+
+    const data = await response.json() as { installations: { app_slug: string }[] };
+    const isInstalled = data.installations.some(inst => inst.app_slug === 'devyntra-deployment-agent');
+
+    res.json({ installed: isInstalled });
+  } catch (error) {
+    console.error('Error checking GitHub App installation:', error);
+    res.status(500).json({ installed: false, error: 'An unexpected error occurred.' });
+  }
+});
 
 // Latest workflow run status
 app.get('/deploy/status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

@@ -106,6 +106,17 @@ export async function julesSend(sessionId: string, prompt: string): Promise<void
   }
 }
 
+export async function checkGitHubAppInstallation(): Promise<{ installed: boolean }> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/github/installation-status`, { headers });
+  if (!res.ok) {
+    // If the request fails, assume it's not installed to be safe.
+    console.error('Failed to check GitHub App installation status');
+    return { installed: false };
+  }
+  return res.json();
+}
+
 export async function triggerDeployment(repoFullName: string): Promise<void> {
   const headers = await authHeader();
   const res = await fetch(`${baseUrl}/trigger-deployment`, {
