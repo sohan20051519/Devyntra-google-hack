@@ -138,33 +138,6 @@ async function getInstallationTokenForUser(uid: string): Promise<string> {
     return getInstallationAccessToken(installationId);
 }
 
-// Exchange a GitHub OAuth code for an access token and store it
-app.post('/auth/github', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-    const { code } = req.body as { code?: string };
-    if (!code) return res.status(400).json({ error: 'Missing code' });
-    const uid = req.uid as string;
-
-    const response = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-        },
-        body: JSON.stringify({
-            client_id: GITHUB_APP_CLIENT_ID,
-            client_secret: githubAppClientSecret.value(),
-            code,
-        }),
-    });
-
-    const data = await response.json() as { access_token: string };
-    if (!response.ok || !data.access_token) {
-        return res.status(400).json({ error: 'Failed to exchange code for token' });
-    }
-
-    await db.collection('githubTokens').doc(uid).set({ accessToken: data.access_token }, { merge: true });
-    res.json({ ok: true });
-});
 
 // List repositories for the authenticated user (selected/all scopes handled by GitHub OAuth)
 app.get('/repos', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -324,36 +297,7 @@ app.get('/github/installation-status', requireAuth, async (req: AuthenticatedReq
         return res.json({ isInstalled: true });
     }
 
-    // 2. Fallback to the old method (checking via GitHub API)
-    const doc = await db.collection('githubTokens').doc(uid).get();
-    if (!doc.exists) {
-      return res.json({ isInstalled: false });
-    }
-    const token = (doc.data() as GitHubToken).accessToken;
-
-    const response = await fetch('https://api.github.com/user/installations', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json'
-      }
-    });
-
-    if (!response.ok) {
-      // If the token is invalid or permissions are revoked, they'll need to re-auth.
-      return res.json({ isInstalled: false });
-    }
-
-    const data = await response.json() as { installations: { app_id: number, id: number }[] };
-    const installation = data.installations.find(inst => inst.app_id === parseInt(GITHUB_APP_ID, 10));
-
-    if (installation) {
-        // If found, save the installation ID for future checks
-        await db.collection('userProfiles').doc(uid).set({
-            githubInstallationId: installation.id,
-        }, { merge: true });
-        return res.json({ isInstalled: true });
-    }
-
+    // If the primary check fails, we can assume the app is not installed or the user profile is missing.
     res.json({ isInstalled: false });
 
   } catch (e) {
@@ -362,18 +306,6 @@ app.get('/github/installation-status', requireAuth, async (req: AuthenticatedReq
   }
 });
 
-app.get('/github/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const uid = req.uid as string;
-  const doc = await db.collection('githubTokens').doc(uid).get();
-  if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const token = (doc.data() as GitHubToken).accessToken;
-  const response = await fetch('https://api.github.com/user', {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
-  });
-  const data = await response.json() as GitHubUser;
-  if (!response.ok) return res.status(response.status).json(data);
-  res.json({ login: data.login, name: data.name, avatar_url: data.avatar_url, html_url: data.html_url });
-});
 
 
 // Latest workflow run status

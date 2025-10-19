@@ -3,10 +3,9 @@ import DeploymentView from './DeploymentView';
 import { MOCK_DEPLOYMENT_HISTORY, MOCK_LOGS, INITIAL_DEPLOYMENT_STEPS } from '../constants';
 import { DeploymentHistoryEntry, LogEntry, DeploymentStep, DeploymentStatus } from '../types';
 import { GoogleGenAI } from "@google/genai";
-import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch } from '../src/api';
+import { fetchRepos, startDeployment, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch } from '../src/api';
 import { auth, observeAuthState, signInWithGitHub } from '../firebase';
 import { updateProfile } from 'firebase/auth';
-import { linkGithub } from '../src/api';
 
 type Page = 'new_deployment' | 'deployments' | 'dev_ai' | 'logs' | 'settings';
 
@@ -254,27 +253,14 @@ const SettingsPage: React.FC<{ userName?: string; userPhoto?: string; userEmail?
     const [isSavingName, setIsSavingName] = useState(false);
     const [nameError, setNameError] = useState<string>('');
 
-    const [ghLoading, setGhLoading] = useState<boolean>(true);
-    const [ghError, setGhError] = useState<string>('');
-    const [ghProfile, setGhProfile] = useState<{ login: string; name: string; avatar_url: string; html_url: string } | null>(null);
+    const ghProfile = {
+        login: auth.currentUser?.providerData?.[0]?.uid,
+        name: auth.currentUser?.displayName,
+        avatar_url: auth.currentUser?.photoURL,
+        html_url: `https://github.com/${auth.currentUser?.providerData?.[0]?.uid}`
+    };
 
     useEffect(() => { setNameInput(userName || ''); }, [userName]);
-
-    useEffect(() => {
-        (async () => {
-            try {
-                setGhLoading(true);
-                const me = await getGithubMe();
-                setGhProfile(me);
-                setGhError('');
-            } catch (e) {
-                setGhError('GitHub not connected');
-                setGhProfile(null);
-            } finally {
-                setGhLoading(false);
-            }
-        })();
-    }, []);
 
     const handleSaveName = async () => {
         if (!auth.currentUser) return;
@@ -294,15 +280,11 @@ const SettingsPage: React.FC<{ userName?: string; userPhoto?: string; userEmail?
 
     const handleReconnectGithub = async () => {
         try {
-            const { githubAccessToken } = await signInWithGitHub();
-            if (githubAccessToken) {
-                await linkGithub(githubAccessToken);
-                const me = await getGithubMe();
-                setGhProfile(me);
-                setGhError('');
-            }
+            await signInWithGitHub();
+            // Force a re-render to get the new profile info
+            window.location.reload();
         } catch (e) {
-            setGhError('Failed to reconnect GitHub');
+            console.error('Failed to reconnect GitHub', e);
         }
     };
 
@@ -510,7 +492,9 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
         setNeedsGithubAuth(false);
       } catch (e) {
         console.error('Failed to fetch repos', e);
-        setNeedsGithubAuth(true);
+        // Setting this to true is no longer the correct UX,
+        // as the app installation is the source of truth.
+        // We can rely on the installation status check.
       }
     })();
   }, []);
@@ -757,18 +741,9 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
             repos={repos}
             error={deployError}
             needsGithubAuth={needsGithubAuth}
-            onAuthorizeGithub={async () => {
-              try {
-                const { githubAccessToken } = await signInWithGitHub();
-                if (githubAccessToken) {
-                  await linkGithub(githubAccessToken);
-                  const list = await fetchRepos();
-                  setRepos(list);
-                  setNeedsGithubAuth(false);
-                }
-              } catch (e) {
-                setNeedsGithubAuth(true);
-              }
+            onAuthorizeGithub={() => {
+                // This is now handled by the app installation flow.
+                // The button in DeploymentView will link to the installation URL.
             }}
             />;
           case 'deployments': return <DeploymentsHistory 
