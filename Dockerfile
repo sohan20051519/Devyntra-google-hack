@@ -10,8 +10,10 @@ RUN npm ci || npm install
 COPY . .
 RUN npm run build --if-present || echo "No build script found"
 
-# Expose the port the app runs on
+# Serve built app on 8080 for Cloud Run
+RUN npm i -g serve
 EXPOSE 8080
+CMD ["serve","-s","dist","-l","8080"]
 
-# Start the production server
-CMD ["node", "server.js"]
+
+
