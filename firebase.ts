@@ -19,8 +19,15 @@ githubProvider.addScope('repo');
 githubProvider.addScope('workflow');
 githubProvider.setCustomParameters({ allow_signup: 'true' });
 
-export function signInWithGitHub() {
-  return signInWithPopup(auth, githubProvider);
+export async function signInWithGitHub() {
+  try {
+    const result = await signInWithPopup(auth, githubProvider);
+    const credential = GithubAuthProvider.credentialFromResult(result);
+    return { githubAccessToken: credential?.accessToken || null };
+  } catch (error) {
+    console.error("Authentication error:", error);
+    throw error;
+  }
 }
 
 export function observeAuthState(callback: (user: User | null) => void) {

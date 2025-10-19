@@ -83,17 +83,6 @@ interface JulesSession {
   }
 }
 
-interface GitHubInstallation {
-  id: number;
-  app_id: number;
-  app_slug: string;
-}
-
-interface GitHubInstallationsResponse {
-  total_count: number;
-  installations: GitHubInstallation[];
-}
-
 
 function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization || '';
@@ -285,28 +274,6 @@ app.get('/github/me', requireAuth, async (req: AuthenticatedRequest, res: Respon
   const data = await response.json() as GitHubUser;
   if (!response.ok) return res.status(response.status).json(data);
   res.json({ login: data.login, name: data.name, avatar_url: data.avatar_url, html_url: data.html_url });
-});
-
-// Check if the GitHub App is installed
-app.get('/github/installation-status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  const uid = req.uid as string;
-  const doc = await db.collection('githubTokens').doc(uid).get();
-  if (!doc.exists) return res.status(400).json({ error: 'GitHub not linked' });
-  const token = (doc.data() as GitHubToken).accessToken;
-  const response = await fetch('https://api.github.com/user/installations', {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json'
-    }
-  });
-  const data = await response.json() as GitHubInstallationsResponse;
-  if (!response.ok) return res.status(response.status).json(data);
-
-  const devyntraInstallation = data.installations.find(
-    (inst: GitHubInstallation) => inst.app_slug === 'devyntra-deployment-agent'
-  );
-
-  res.json({ installed: !!devyntraInstallation });
 });
 
 
