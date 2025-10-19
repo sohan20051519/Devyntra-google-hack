@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import DeploymentView from './DeploymentView';
+import GitHubAppInstallation from './GitHubAppInstallation';
 import { MOCK_DEPLOYMENT_HISTORY, MOCK_LOGS, INITIAL_DEPLOYMENT_STEPS } from '../constants';
 import { DeploymentHistoryEntry, LogEntry, DeploymentStep, DeploymentStatus } from '../types';
 import { GoogleGenAI } from "@google/genai";
-import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch } from '../src/api';
+import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch, getInstallationStatus } from '../src/api';
 import { auth, observeAuthState, signInWithGitHub } from '../firebase';
 import { updateProfile } from 'firebase/auth';
 import { linkGithub } from '../src/api';
@@ -457,6 +458,33 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const [isJulesComplete, setIsJulesComplete] = useState<boolean>(false);
   const [isPatchApplied, setIsPatchApplied] = useState<boolean>(false);
   const [isDeploymentTriggered, setIsDeploymentTriggered] = useState<boolean>(false);
+  const [isAppInstalled, setIsAppInstalled] = useState<boolean | null>(null);
+
+  const checkInstallation = useCallback(async () => {
+    try {
+      const status = await getInstallationStatus();
+      setIsAppInstalled(status.installed);
+    } catch (error) {
+      console.error("Error checking GitHub App installation status:", error);
+      setIsAppInstalled(false); // Assume not installed on error
+    }
+  }, []);
+
+  useEffect(() => {
+    checkInstallation();
+
+    const handleFocus = () => {
+      // Re-check installation status when the window regains focus
+      // This is useful for when the user installs the app and returns
+      checkInstallation();
+    };
+
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [checkInstallation]);
+
 
   const pageTitles: Record<Page, string> = {
       new_deployment: 'New Deployment',
@@ -799,6 +827,25 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
           />;
       }
   };
+
+  if (isAppInstalled === null) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-50">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-2xl animate-spin">sync</span>
+          <span>Checking GitHub App installation...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (isAppInstalled === false) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-50 p-4">
+        <GitHubAppInstallation />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
