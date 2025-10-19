@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Devyntra Firebase Functions",
   "scripts": {
-    "build": "rimraf lib && tsc -p tsconfig.json && cp src/workflow-template.yml lib/workflow-template.yml",
+    "build": "rimraf lib && tsc -p tsconfig.json && copyfiles -u 1 src/workflow-template.yml lib",
     "deploy": "npm run build && firebase deploy --only functions",
     "serve": "npm run build && firebase emulators:start --only functions",
     "start": "npm run serve",
@@ -46,6 +46,7 @@
     "@typescript-eslint/eslint-plugin": "^8.15.0",
     "@typescript-eslint/parser": "^8.15.0",
     "typescript": "^5.8.2",
-    "rimraf": "^5.0.1"
+    "rimraf": "^5.0.1",
+    "copyfiles": "^2.4.1"
   }
 }
