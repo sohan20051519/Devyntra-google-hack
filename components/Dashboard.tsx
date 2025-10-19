@@ -3,7 +3,7 @@ import DeploymentView from './DeploymentView';
 import { MOCK_DEPLOYMENT_HISTORY, MOCK_LOGS, INITIAL_DEPLOYMENT_STEPS } from '../constants';
 import { DeploymentHistoryEntry, LogEntry, DeploymentStep, DeploymentStatus } from '../types';
 import { GoogleGenAI } from "@google/genai";
-import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch, getGithubInstallationStatus, getWorkflowStatus, getWorkflowLogs, startJulesAnalysis } from '../src/api';
+import { fetchRepos, startDeployment, getGithubMe, getDeployStatus, devAiAsk, getJulesStatus, julesSend, triggerDeployment, applyPatch } from '../src/api';
 import { auth, observeAuthState, signInWithGitHub } from '../firebase';
 import { updateProfile } from 'firebase/auth';
 import { linkGithub } from '../src/api';
@@ -439,7 +439,6 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const [selectedRepo, setSelectedRepo] = useState<string>('');
   const [repos, setRepos] = useState<{ id: string; name: string }[]>([]);
   const [needsGithubAuth, setNeedsGithubAuth] = useState<boolean>(false);
-  const [isGhAppInstalled, setIsGhAppInstalled] = useState<boolean>(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploymentSteps, setDeploymentSteps] = useState<DeploymentStep[]>(JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS)));
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
@@ -448,7 +447,6 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
   const [workflowStatus, setWorkflowStatus] = useState<string>('');
   const [workflowConclusion, setWorkflowConclusion] = useState<string | null>(null);
   const [workflowUrl, setWorkflowUrl] = useState<string | null>(null);
-  const [validationRunId, setValidationRunId] = useState<number | null>(null);
   const [pendingDeploymentUrl, setPendingDeploymentUrl] = useState<string | null>(null);
   const [julesSessionId, setJulesSessionId] = useState<string | null>(null);
   const [deployStartedAt, setDeployStartedAt] = useState<number>(0);
@@ -503,44 +501,99 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     return () => unsub();
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      if (!auth.currentUser) return;
-      try {
-        const list = await fetchRepos();
-        setRepos(list);
+  const [isGhAppInstalled, setIsGhAppInstalled] = useState(false);
+
+  const checkInstallationAndRepos = useCallback(async () => {
+    console.log('Checking installation status...');
+    if (!auth.currentUser) return false;
+    try {
+      // Use a new API endpoint that combines both checks
+      const response = await getInstallationAndRepos();
+
+      if (response.installed) {
+        console.log('App is installed.');
+        setIsGhAppInstalled(true);
+        setRepos(response.repos || []);
         setNeedsGithubAuth(false);
-
-        const status = await getGithubInstallationStatus();
-        setIsGhAppInstalled(status.isInstalled);
-
-      } catch (e) {
-        console.error('Failed to fetch repos', e);
-        setNeedsGithubAuth(true);
+        return true;
+      } else {
+        console.log('App is not installed.');
+        setIsGhAppInstalled(false);
+        setRepos([]);
+        return false;
       }
-    })();
+    } catch (error) {
+      console.error('Error checking GitHub App installation status:', error);
+      setIsGhAppInstalled(false);
+      setRepos([]);
+      // If the check fails, it could be due to auth, so we prompt to re-auth
+      setNeedsGithubAuth(true);
+      return false;
+    }
   }, []);
+
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout | null = null;
+
+    const startPolling = () => {
+      checkInstallationAndRepos().then(installed => {
+        if (!installed) {
+          intervalId = setInterval(async () => {
+            console.log('Polling for installation status...');
+            const isInstalled = await checkInstallationAndRepos();
+            if (isInstalled && intervalId) {
+              console.log('Installation confirmed, stopping poll.');
+              clearInterval(intervalId);
+            }
+          }, 3000); // Poll every 3 seconds
+        }
+      });
+    };
+
+    startPolling();
+
+    return () => {
+      if (intervalId) {
+        console.log('Clearing interval on unmount.');
+        clearInterval(intervalId);
+      }
+    };
+  }, [checkInstallationAndRepos]);
 
   const handleDeploy = async () => {
     if (!selectedRepo || isDeploying) return;
     resetState();
     setIsDeploying(true);
-    setDeployError('');
-
-    const freshSteps = JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS));
-    freshSteps[0].status = DeploymentStatus.RUNNING;
-    setDeploymentSteps(freshSteps);
-    setCurrentStepIndex(0);
-    setDeployStartedAt(Date.now());
-
     try {
+      setDeployError('');
       const result = await startDeployment(selectedRepo);
       setPendingDeploymentUrl(result.deploymentUrl);
-      setValidationRunId(result.validationRunId);
+      if ((result as any).julesSessionId) setJulesSessionId((result as any).julesSessionId);
+      // Enrich first steps with detected framework
+      const framework = (result as any).detectedFramework as string | undefined;
+      // Start at first step with running state
+      const fresh = JSON.parse(JSON.stringify(INITIAL_DEPLOYMENT_STEPS)) as DeploymentStep[];
+      if (fresh.length > 0) {
+        fresh[0].status = DeploymentStatus.RUNNING;
+        if (framework) {
+          fresh[0].log = `repository_scan_initiated... detected ${framework}.`;
+          fresh[0].details = `Detected ${framework} project.`;
+        }
+      }
+      setDeploymentSteps(fresh);
+      setCurrentStepIndex(0);
+      setDeployStartedAt(Date.now());
+      setSawInProgress(false);
+      setLastStepAdvanceAt(Date.now());
     } catch (e) {
       const message = (e as Error)?.message || 'Deployment failed';
       console.error('Deployment failed', e);
-      setDeployError(message);
+      if (message.toLowerCase().includes('github not linked')) {
+        setNeedsGithubAuth(true);
+        setDeployError('GitHub is not authorized. Please authorize to continue.');
+      } else {
+        setDeployError(message);
+      }
       setIsDeploying(false);
     }
   };
@@ -568,65 +621,6 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
       setLogFilter(deploymentId);
       setActivePage('logs');
   }, []);
-
-  // Poll for validation workflow completion
-  useEffect(() => {
-    if (!isDeploying || !validationRunId || julesSessionId) return;
-
-    let isCancelled = false;
-    const interval = setInterval(async () => {
-      try {
-        const { status, conclusion } = await getWorkflowStatus(selectedRepo, validationRunId);
-        if (isCancelled) return;
-
-        if (status === 'completed') {
-          clearInterval(interval);
-          setDeploymentSteps(prev => {
-            const steps = [...prev];
-            steps[0].status = conclusion === 'success' ? DeploymentStatus.COMPLETED : DeploymentStatus.FAILED;
-            return steps;
-          });
-
-          if (conclusion === 'success') {
-            // Validation succeeded, skip to deployment
-            setDeploymentSteps(prev => {
-                const steps = [...prev];
-                steps[1].status = DeploymentStatus.COMPLETED; // Skip Code Analysis
-                steps[1].details = "Validation passed, skipping AI analysis.";
-                steps[2].status = DeploymentStatus.COMPLETED; // Skip Applying AI Fixes
-                steps[2].details = "No fixes needed.";
-                steps[3].status = DeploymentStatus.RUNNING; // Move to Triggering Deployment
-                return steps;
-            });
-            setCurrentStepIndex(3);
-            await triggerDeployment(selectedRepo);
-            setIsDeploymentTriggered(true);
-          } else {
-            // Validation failed, start Jules analysis
-            const { logs } = await getWorkflowLogs(selectedRepo, validationRunId);
-            const { julesSessionId } = await startJulesAnalysis(selectedRepo, logs);
-            setJulesSessionId(julesSessionId);
-            setDeploymentSteps(prev => {
-                const steps = [...prev];
-                steps[1].status = DeploymentStatus.RUNNING; // Move to Code Analysis
-                return steps;
-            });
-            setCurrentStepIndex(1);
-          }
-        }
-      } catch (e) {
-        console.error('Validation polling error', e);
-        setDeployError((e as Error).message);
-        setIsDeploying(false);
-        clearInterval(interval);
-      }
-    }, 5000);
-
-    return () => {
-      isCancelled = true;
-      clearInterval(interval);
-    };
-  }, [isDeploying, validationRunId, selectedRepo, julesSessionId]);
 
   // Poll Jules activities for live logs and completion
   useEffect(() => {
@@ -726,18 +720,38 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
     const updateStepsForStatus = (status: string, conclusion: string | null) => {
       setDeploymentSteps(prev => {
         const steps = [...prev];
-        const triggerStepIndex = 3;
+        const currentCIIndex = 2; // "Install Dependencies" is the first CI step
 
-        if (status === 'queued' || status === 'in_progress') {
-            steps[triggerStepIndex].status = DeploymentStatus.RUNNING;
-            steps[triggerStepIndex].log = `CI pipeline is ${status.replace('_', ' ')}...`;
+        if (status === 'queued') {
+          setCurrentStepIndex(currentCIIndex);
+        } else if (status === 'in_progress') {
+          setSawInProgress(true);
+          const now = Date.now();
+          // This logic now advances through the *CI-related* steps only
+          if (now - lastStepAdvanceAt > 5000) {
+            setLastStepAdvanceAt(now);
+            setCurrentStepIndex(idx => Math.min(idx + 1, steps.length - 1));
+          }
         } else if (status === 'completed') {
           if (conclusion === 'success') {
-            steps[triggerStepIndex].status = DeploymentStatus.COMPLETED;
+            // Mark all remaining steps as complete
+            for (let i = currentStepIndex; i < steps.length; i++) {
+                steps[i].status = DeploymentStatus.COMPLETED;
+            }
+            setCurrentStepIndex(steps.length);
           } else {
-            steps[triggerStepIndex].status = DeploymentStatus.FAILED;
+            const runningIdx = steps.findIndex(s => s.status === DeploymentStatus.RUNNING);
+            if (runningIdx >= 0) steps[runningIdx].status = DeploymentStatus.FAILED;
           }
         }
+
+        // Update statuses based on index, respecting pre-CI steps
+        steps.forEach((step, idx) => {
+            if (idx < currentStepIndex) step.status = DeploymentStatus.COMPLETED;
+            else if (idx === currentStepIndex) step.status = DeploymentStatus.RUNNING;
+            else step.status = DeploymentStatus.PENDING;
+        });
+
         return steps;
       });
     };
@@ -858,35 +872,7 @@ const Dashboard: React.FC<{onLogout: () => void}> = ({onLogout}) => {
             userPhoto={userPhoto}
         />
         <main className="flex-1 overflow-y-auto p-4 md:p-8">
-          {activePage === 'new_deployment' && (
-            <DeploymentView 
-              selectedRepo={selectedRepo}
-              onRepoSelect={setSelectedRepo}
-              isDeploying={isDeploying}
-              deploymentSteps={deploymentSteps}
-              currentStepIndex={currentStepIndex}
-              deployedLink={deployedLink}
-              onDeploy={handleDeploy}
-              onNewDeployment={handleNewDeployment}
-              repos={repos}
-              error={deployError}
-              needsGithubAuth={needsGithubAuth}
-              onAuthorizeGithub={async () => {
-                try {
-                  const { githubAccessToken } = await signInWithGitHub();
-                  if (githubAccessToken) {
-                    await linkGithub(githubAccessToken);
-                    const list = await fetchRepos();
-                    setRepos(list);
-                    setNeedsGithubAuth(false);
-                  }
-                } catch (e) {
-                  setNeedsGithubAuth(true);
-                }
-              }}
-            />
-          )}
-          {activePage !== 'new_deployment' && renderContent()}
+          {renderContent()}
         </main>
       </div>
     </div>

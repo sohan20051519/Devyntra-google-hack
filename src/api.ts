@@ -97,6 +97,14 @@ export async function getGithubInstallationStatus(): Promise<{ isInstalled: bool
   return res.json();
 }
 
+// A new function combining the two checks for efficiency
+export async function getInstallationAndRepos(): Promise<{ installed: boolean; repos: { id: string; name: string }[] }> {
+    const headers = await authHeader();
+    const res = await fetch(`${baseUrl}/github/installation-and-repos`, { headers });
+    if (!res.ok) throw new Error('Failed to fetch installation status and repos');
+    return res.json();
+}
+
 export async function getDeployStatus(repoFullName: string): Promise<{ status: string; conclusion: string | null; html_url: string | null }>{
   const headers = await authHeader();
   const url = `${baseUrl}/deploy/status?repo=${encodeURIComponent(repoFullName)}`;
