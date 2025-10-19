@@ -123,6 +123,13 @@ export async function triggerDeployment(repoFullName: string): Promise<void> {
   }
 }
 
+export async function getInstallationStatus(): Promise<{ installed: boolean }> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/github/installation-status`, { headers });
+  if (!res.ok) throw new Error('Failed to fetch installation status');
+  return res.json();
+}
+
 export async function exchangeCodeForToken(code: string): Promise<void> {
   const headers = await authHeader();
   await fetch(`${baseUrl}/auth/github`, {
