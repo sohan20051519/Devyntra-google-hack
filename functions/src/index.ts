@@ -3,12 +3,12 @@ import admin from "firebase-admin";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { Octokit } from "@octokit/rest";
-import { defineString } from 'firebase-functions/params';
+import { defineString, defineSecret } from 'firebase-functions/params';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const GITHUB_CLIENT_ID = defineString('GITHUB_CLIENT_ID');
 const GITHUB_CLIENT_SECRET = defineString('GITHUB_CLIENT_SECRET');
-const GENAI_API_KEY = defineString('GENAI_API_KEY');
+const GENAI_API_KEY = defineSecret('GENAI_API_KEY');
 
 admin.initializeApp();
 const db = admin.firestore();
