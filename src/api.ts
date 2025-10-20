@@ -15,14 +15,14 @@ async function authHeader() {
 }
 
 export async function linkGithub(accessToken: string) {
-  const headers = await authHeader();
-  const res = await fetch(`${baseUrl}/auth/github`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ accessToken })
-  });
-  if (!res.ok) throw new Error('Failed to link GitHub');
-  return res.json();
+    const headers = await authHeader();
+    const res = await fetch(`${baseUrl}/auth/github`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ accessToken }),
+    });
+    if (!res.ok) throw new Error('Failed to link GitHub');
+    return res.json();
 }
 
 export async function fetchRepos(): Promise<{ id: string; name: string }[]> {
@@ -172,15 +172,6 @@ export async function triggerDeployment(repoFullName: string): Promise<void> {
   }
 }
 
-export async function exchangeCodeForToken(code: string): Promise<void> {
-  const response = await fetch(`${baseUrl}/auth/github`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code }),
-  });
-  const { customToken } = await response.json();
-  await signInWithCustomToken(auth, customToken);
-}
 
 export async function applyPatch(repoFullName: string, julesSessionId: string): Promise<void> {
   const headers = await authHeader();
