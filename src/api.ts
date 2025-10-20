@@ -1,4 +1,5 @@
 import { auth } from '../firebase';
+import { signInWithCustomToken } from 'firebase/auth';
 
 // Backend API base URL
 const baseUrl =
@@ -172,12 +173,13 @@ export async function triggerDeployment(repoFullName: string): Promise<void> {
 }
 
 export async function exchangeCodeForToken(code: string): Promise<void> {
-  const headers = await authHeader();
-  await fetch(`${baseUrl}/auth/github`, {
+  const response = await fetch(`${baseUrl}/auth/github`, {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code }),
   });
+  const { customToken } = await response.json();
+  await signInWithCustomToken(auth, customToken);
 }
 
 export async function applyPatch(repoFullName: string, julesSessionId: string): Promise<void> {

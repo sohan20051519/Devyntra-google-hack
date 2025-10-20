@@ -7,7 +7,6 @@ import { exchangeCodeForToken } from './src/api';
 
 const App: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
     const handleAuthCallback = async () => {
@@ -23,14 +22,12 @@ const App: React.FC = () => {
           // Handle error state in UI if necessary
         }
       }
-      setAuthChecked(true);
     };
 
     handleAuthCallback();
 
     const unsub = observeAuthState((user) => {
       setIsAuthenticated(!!user);
-      setAuthChecked(true); // Also mark as checked when auth state is known
     });
     return () => unsub();
   }, []);
@@ -51,10 +48,6 @@ const App: React.FC = () => {
       console.error('Sign out failed', e);
     }
   }, []);
-
-  if (!authChecked) {
-    return <div>Loading...</div>; // Or a proper spinner component
-  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
