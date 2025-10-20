@@ -1,5 +1,5 @@
-import * as functions from "firebase-functions";
-import * as admin from "firebase-admin";
+import { https } from "firebase-functions";
+import admin from "firebase-admin";
 import express from "express";
 import cors from "cors";
 import { Octokit } from "@octokit/rest";
@@ -178,5 +178,5 @@ app.get("/jules/status", (req, res) => res.status(200).send({ session: { state: 
 app.post("/jules/send", (req, res) => res.status(200).send({ success: true }));
 app.post("/trigger-deployment", (req, res) => res.status(200).send({ success: true }));
 app.post("/apply-patch", (req, res) => res.status(200).send({ success: true }));
-const api = functions.https.onRequest(app);
+const api = https.onRequest(app);
 export { api };
