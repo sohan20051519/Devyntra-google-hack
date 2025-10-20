@@ -13,6 +13,16 @@ async function authHeader() {
   return { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' };
 }
 
+export async function linkGithub(accessToken: string) {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/auth/github`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ accessToken })
+  });
+  if (!res.ok) throw new Error('Failed to link GitHub');
+  return res.json();
+}
 
 export async function fetchRepos(): Promise<{ id: string; name: string }[]> {
   const headers = await authHeader();
@@ -73,6 +83,12 @@ export async function startJulesAnalysis(repoFullName: string, logs: string): Pr
     return res.json();
 }
 
+export async function getGithubMe(): Promise<{ login: string; name: string; avatar_url: string; html_url: string }> {
+  const headers = await authHeader();
+  const res = await fetch(`${baseUrl}/github/me`, { headers });
+  if (!res.ok) throw new Error('Failed to load GitHub profile');
+  return res.json();
+}
 
 export async function getGithubInstallationStatus(): Promise<{ isInstalled: boolean }> {
   const headers = await authHeader();
@@ -155,6 +171,14 @@ export async function triggerDeployment(repoFullName: string): Promise<void> {
   }
 }
 
+export async function exchangeCodeForToken(code: string): Promise<void> {
+  const headers = await authHeader();
+  await fetch(`${baseUrl}/auth/github`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ code }),
+  });
+}
 
 export async function applyPatch(repoFullName: string, julesSessionId: string): Promise<void> {
   const headers = await authHeader();
