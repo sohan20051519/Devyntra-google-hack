@@ -13,72 +13,6 @@ const db = admin.firestore();
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
-const optionalAuthenticate = async (req, res, next) => {
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-        const idToken = req.headers.authorization.split('Bearer ')[1];
-        try {
-            const decodedIdToken = await admin.auth().verifyIdToken(idToken);
-            req.user = decodedIdToken;
-        }
-        catch (e) {
-            // Ignore error, user is not authenticated
-        }
-    }
-    next();
-};
-app.get("/", (req, res) => res.status(200).send("Hey there!"));
-app.post("/auth/github", optionalAuthenticate, async (req, res) => {
-    const { code } = req.body;
-    if (!code) {
-        return res.status(400).send({ error: "Missing authorization code." });
-    }
-    try {
-        const githubResponse = await fetch("https://github.com/login/oauth/access_token", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            body: JSON.stringify({
-                client_id: GITHUB_CLIENT_ID.value(),
-                client_secret: GITHUB_CLIENT_SECRET.value(),
-                code,
-            }),
-        });
-        const githubData = await githubResponse.json();
-        if (githubData.error) {
-            return res.status(400).send({ error: githubData.error_description });
-        }
-        const accessToken = githubData.access_token;
-        // Use the access token to get the user's details
-        const octokit = new Octokit({ auth: accessToken });
-        const { data: githubUser } = await octokit.users.getAuthenticated();
-        // Create or update the user in Firebase Auth
-        const firebaseUser = await admin.auth().getUserByEmail(githubUser.email || "").catch(() => null);
-        let uid = firebaseUser?.uid;
-        if (!uid) {
-            const newUser = await admin.auth().createUser({
-                email: githubUser.email || '',
-                displayName: githubUser.name,
-                photoURL: githubUser.avatar_url,
-                emailVerified: true
-            });
-            uid = newUser.uid;
-        }
-        // Store the token securely, associated with the Firebase user
-        await db.collection("githubTokens").doc(uid).set({
-            accessToken,
-            githubUsername: githubUser.login,
-            githubUserId: githubUser.id,
-        }, { merge: true });
-        const customToken = await admin.auth().createCustomToken(uid);
-        res.status(200).send({ customToken });
-    }
-    catch (error) {
-        console.error("Error exchanging code for token:", error);
-        res.status(500).send({ error: "Internal server error." });
-    }
-});
 const authenticate = async (req, res, next) => {
     if (!req.headers.authorization || !req.headers.authorization.startsWith('Bearer ')) {
         return res.status(403).send('Unauthorized');
@@ -93,6 +27,25 @@ const authenticate = async (req, res, next) => {
         res.status(403).send('Unauthorized');
     }
 };
+app.get("/", (req, res) => res.status(200).send("Hey there!"));
+app.post("/auth/github", authenticate, async (req, res) => {
+    const { accessToken } = req.body;
+    const { uid } = req.user;
+    if (!accessToken) {
+        return res.status(400).send({ error: "Missing access token." });
+    }
+    try {
+        // Store the token securely, associated with the Firebase user
+        await db.collection("githubTokens").doc(uid).set({
+            accessToken,
+        }, { merge: true });
+        res.status(200).send({ success: true });
+    }
+    catch (error) {
+        console.error("Error storing access token:", error);
+        res.status(500).send({ error: "Internal server error." });
+    }
+});
 // All routes below this require authentication
 app.use(authenticate);
 app.get("/repos", async (req, res) => {
